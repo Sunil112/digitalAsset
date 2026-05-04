@@ -1,0 +1,74 @@
+module Common.Registry where
+import Daml.Script
+import DA.optional(fromSome)
+
+template Participant
+  with
+    admin : Party
+    participant : Party
+    active : Bool
+  where
+    signatory admin
+    observer participant
+
+    choice Activate : ContractId Participant
+        controller admin
+        do create this with active = True
+         
+    choice Deactivate : ContractId Participant
+        controller admin
+        do create this with active = False
+
+template AssetDirectory
+  with
+    admin : Party
+    assetId : Text
+    enabled : Bool
+    viewers : [Party]
+  where
+    signatory admin
+    observer viewers
+
+    choice RegisterAsset : ContractId AssetDirectory
+        controller admin
+        do create this with enabled = False
+         
+    choice EnableAsset : ContractId AssetDirectory
+        controller admin
+        do create this with enabled = True  
+
+    choice DisableAsset : ContractId AssetDirectory
+        controller admin        
+        do create this with enabled = False
+
+template AssetPermission
+  with
+    admin : Party
+    assetId : Text
+    allowedHolders : [Party]
+    allowedIssuers : [Party]
+    viewers : [Party]
+
+  where
+    signatory admin
+    observer allowedHolders, allowedIssuers, viewers
+
+    choice AllowHolder : ContractId AssetPermission
+      with holder : Party
+      controller admin
+      do create this with allowedHolders = holder :: allowedHolders
+
+    choice BlockHolder : ContractId AssetPermission
+      with holder : Party
+      controller admin
+      do create this with allowedHolders = filter (/= holder) allowedHolders
+
+    choice AllowIssuer : ContractId AssetPermission
+      with issuer : Party
+      controller admin
+      do create this with allowedIssuers = issuer :: allowedIssuers
+
+    choice RevokeIssuer : ContractId AssetPermission
+      with issuer : Party
+      controller admin
+      do create this with allowedIssuers = filter (/= issuer) allowedIssuers
