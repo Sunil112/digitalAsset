@@ -1,0 +1,28 @@
+module Common.Governance where
+
+import DA.List(filter)
+import Daml.Script
+import DA.optional
+
+
+template AdminRole
+  with
+    superAdmin : Party
+    admins : [Party]
+  where
+    signatory superAdmin
+    observer admins
+
+    choice AddAdmin : ContractId AdminRole 
+    with
+       newAdmin : Party
+       controller superAdmin
+       do create this with admins = newAdmin :: admins
+    
+    choice RemoveAdmin : ContractId AdminRole
+    with      
+       adminToRemove : Party
+       controller superAdmin
+       do create this with admins = filter (/= adminToRemove) admins    
+
+  
