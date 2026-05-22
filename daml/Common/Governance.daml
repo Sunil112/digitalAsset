@@ -1,0 +1,53 @@
+module Common.Governance where
+
+import DA.List(filter)
+import Daml.Script
+import DA.Optional
+
+template AdminRole
+  with
+    superAdmin : Party
+    admins : [Party]
+  where
+    signatory superAdmin
+    observer admins
+
+    choice AddAdmin : ContractId AdminRole
+      with
+        newAdmin : Party
+      controller superAdmin
+      do
+        create this with admins = newAdmin :: admins
+
+    choice RemoveAdmin : ContractId AdminRole
+      with
+        adminToRemove : Party
+      controller superAdmin
+      do
+        create this with admins = filter (/= adminToRemove) admins
+
+template PauseSwitch
+  with
+    owner : Party
+    viewers : [Party]
+    adminRoleCid : ContractId AdminRole
+    paused : Bool
+  where
+    signatory owner
+    observer viewers
+
+    choice PauseAll : ContractId PauseSwitch
+      controller owner
+      do
+        ar <- fetch adminRoleCid
+        assertMsg "Only admins can pause the system"
+          (owner == ar.superAdmin || elem owner ar.admins)
+        create this with paused = True
+
+    choice ResumeAll : ContractId PauseSwitch
+      controller owner
+      do
+        ar <- fetch adminRoleCid
+        assertMsg "Only admins can resume the system"
+          (owner == ar.superAdmin || elem owner ar.admins)
+        create this with paused = False
