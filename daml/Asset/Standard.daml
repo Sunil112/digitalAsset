@@ -1,0 +1,53 @@
+module Asset.Standard where
+
+import DA.Optional(fromSome)
+import Daml.Script
+
+import Common.Governance as Governance
+import Common.Registry as Registry
+
+
+template Asset
+  with
+    assetAdmin : Party
+    assetId : Text
+    directoryCid : ContractId Registry.AssetDirectory
+    permissionCid : ContractId Registry.AssetPermission
+    pauseCid : ContractId Governance.PauseSwitch
+  where
+    signatory assetAdmin
+
+    choice CreateHolding : ContractId Holding
+     with Owner : Party
+     controller assetAdmin
+        do
+          assertNotPaused pauseCid
+          assertAssetEnabled directoryCid
+          assertAllowedHolder permissionCid Owner
+          create Holding with
+            assetAdmin = assetAdmin
+            assetId = assetId
+            owner = Owner
+            amount = 0.0
+            directoryCid = directoryCid
+            permissionCid = permissionCid
+            pauseCid = pauseCid
+
+template Holding
+  with  
+    assetAdmin : Party
+    assetId : Text
+    owner : Party
+    amount : Decimal
+    directoryCid : ContractId Registry.AssetDirectory
+    permissionCid : ContractId Registry.AssetPermission
+    pauseCid : ContractId Governance.PauseSwitch
+  where
+    signatory assetAdmin
+    observer owner
+
+    ensure amount >= 0.0
+
+    
+
+     
