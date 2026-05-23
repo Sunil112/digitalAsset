@@ -1,11 +1,10 @@
 module Asset.Standard where
 
-import DA.Optional(fromSome)
+import DA.Optional (fromSome)
 import Daml.Script
 
 import Common.Governance as Governance
 import Common.Registry as Registry
-
 
 template Asset
   with
@@ -18,23 +17,24 @@ template Asset
     signatory assetAdmin
 
     choice CreateHolding : ContractId Holding
-     with Owner : Party
-     controller assetAdmin
-        do
-          assertNotPaused pauseCid
-          assertAssetEnabled directoryCid
-          assertAllowedHolder permissionCid Owner
-          create Holding with
-            assetAdmin = assetAdmin
-            assetId = assetId
-            owner = Owner
-            amount = 0.0
-            directoryCid = directoryCid
-            permissionCid = permissionCid
-            pauseCid = pauseCid
+      with
+        Owner : Party
+      controller assetAdmin
+      do
+        assertNotPaused pauseCid
+        assertAssetEnabled directoryCid
+        assertAllowedHolder permissionCid Owner
+        create Holding with
+          assetAdmin = assetAdmin
+          assetId = assetId
+          owner = Owner
+          amount = 0.0
+          directoryCid = directoryCid
+          permissionCid = permissionCid
+          pauseCid = pauseCid
 
 template Holding
-  with  
+  with
     assetAdmin : Party
     assetId : Text
     owner : Party
@@ -48,6 +48,75 @@ template Holding
 
     ensure amount >= 0.0
 
-    
+    choice Transfer : (ContractId Holding, ContractId Holding)
+      with
+        receiver : Party
+        qty : Decimal
+      controller assetAdmin, owner
+      do
+        assertNotPaused pauseCid
+        assertAssetEnabled directoryCid
+        assertAllowedHolder permissionCid receiver
+        assertMsg "INVALID_TRANSFER_AMOUNT" (qty > 0.0 && qty <= amount)
 
-     
+        recv <- create this with owner = receiver; amount = qty
+        change <- create this with owner = owner; amount = amount - qty
+        pure (recv, change)
+
+    choice Split : (ContractId Holding, ContractId Holding)
+      with
+        qty1 : Decimal
+      controller assetAdmin, owner
+      do
+        assertNotPaused pauseCid
+        assertMsg "INVALID_SPLIT_AMOUNT" (qty1 > 0.0 && qty1 < amount)
+        h1 <- create this with amount = qty1
+        h2 <- create this with amount = amount - qty1
+        pure (h1, h2)
+
+    choice Merge : ContractId Holding
+      with
+        otherCid : ContractId Holding
+      controller assetAdmin, owner
+      do
+        assertNotPaused pauseCid
+        other <- fetch otherCid
+        assertMsg "MERGE_MISMATCH" (other.assetId == assetId && other.owner == owner && other.assetAdmin == assetAdmin)
+        archive otherCid
+        create this with amount = amount + other.amount
+
+    choice LockForSwap : ContractId Lock
+      with
+        escrow : Party
+        counterparty : Party
+      controller assetAdmin, owner, escrow
+      do
+        assertMsg "INVALID_LOCK" (qty > 0.0 && qty <= amount)
+        change <- create this with amount = amount - qty
+        create Lock with
+          assetAdmin = assetAdmin
+          assetId = assetId
+          fromOwner = owner
+          toOwner = counterparty
+          qty = qty
+          escrow = escrow
+          directoryCid = directoryCid
+          permissionCid = permissionCid
+          pauseCid = pauseCid
+
+    choice Unlock : ContractId Holding
+      with
+        lockCid : ContractId Lock
+        escrow : Party
+      controller assetAdmin, escrow
+      do
+        exercise lockCid ReturnLock
+
+
+
+
+    ----------------------MINT Request--------------------------------
+
+
+
+        
