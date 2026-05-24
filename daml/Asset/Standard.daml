@@ -1,0 +1,205 @@
+module Asset.Standard where
+
+import DA.Optional (fromSome)
+import Daml.Script
+
+import Common.Governance as Governance
+import Common.Registry as Registry
+
+template Asset
+  with
+    assetAdmin : Party
+    assetId : Text
+    directoryCid : ContractId Registry.AssetDirectory
+    permissionCid : ContractId Registry.AssetPermission
+    pauseCid : ContractId Governance.PauseSwitch
+  where
+    signatory assetAdmin
+
+    choice CreateHolding : ContractId Holding
+      with
+        Owner : Party
+      controller assetAdmin
+      do
+        assertNotPaused pauseCid
+        assertAssetEnabled directoryCid
+        assertAllowedHolder permissionCid Owner
+        create Holding with
+          assetAdmin = assetAdmin
+          assetId = assetId
+          owner = Owner
+          amount = 0.0
+          directoryCid = directoryCid
+          permissionCid = permissionCid
+          pauseCid = pauseCid
+
+template Holding
+  with
+    assetAdmin : Party
+    assetId : Text
+    owner : Party
+    amount : Decimal
+    directoryCid : ContractId Registry.AssetDirectory
+    permissionCid : ContractId Registry.AssetPermission
+    pauseCid : ContractId Governance.PauseSwitch
+  where
+    signatory assetAdmin
+    observer owner
+
+    ensure amount >= 0.0
+
+    choice Transfer : (ContractId Holding, ContractId Holding)
+      with
+        receiver : Party
+        qty : Decimal
+      controller assetAdmin, owner
+      do
+        assertNotPaused pauseCid
+        assertAssetEnabled directoryCid
+        assertAllowedHolder permissionCid receiver
+        assertMsg "INVALID_TRANSFER_AMOUNT" (qty > 0.0 && qty <= amount)
+
+        recv <- create this with owner = receiver; amount = qty
+        change <- create this with owner = owner; amount = amount - qty
+        pure (recv, change)
+
+    choice Split : (ContractId Holding, ContractId Holding)
+      with
+        qty1 : Decimal
+      controller assetAdmin, owner
+      do
+        assertNotPaused pauseCid
+        assertMsg "INVALID_SPLIT_AMOUNT" (qty1 > 0.0 && qty1 < amount)
+        h1 <- create this with amount = qty1
+        h2 <- create this with amount = amount - qty1
+        pure (h1, h2)
+
+    choice Merge : ContractId Holding
+      with
+        otherCid : ContractId Holding
+      controller assetAdmin, owner
+      do
+        assertNotPaused pauseCid
+        other <- fetch otherCid
+        assertMsg "MERGE_MISMATCH" (other.assetId == assetId && other.owner == owner && other.assetAdmin == assetAdmin)
+        archive otherCid
+        create this with amount = amount + other.amount
+
+    choice LockForSwap : ContractId Lock
+      with
+        escrow : Party
+        counterparty : Party
+      controller assetAdmin, owner, escrow
+      do
+        assertMsg "INVALID_LOCK" (qty > 0.0 && qty <= amount)
+        change <- create this with amount = amount - qty
+        create Lock with
+          assetAdmin = assetAdmin
+          assetId = assetId
+          fromOwner = owner
+          toOwner = counterparty
+          qty = qty
+          escrow = escrow
+          directoryCid = directoryCid
+          permissionCid = permissionCid
+          pauseCid = pauseCid
+
+    choice Unlock : ContractId Holding
+      with
+        lockCid : ContractId Lock
+        escrow : Party
+      controller assetAdmin, escrow
+      do
+        exercise lockCid ReturnLock
+
+
+
+
+    ----------------------MINT Request--------------------------------
+
+  
+template MintRequest
+  with
+    assetAdmin : Party
+    assetId : Text
+    issuer : Party
+    targetOwner : Party
+    qty : Decimal
+    directoryCid : ContractId Registry.AssetDirectory
+    permissionCid : ContractId Registry.AssetPermission
+    pauseCid : ContractId Governance.PauseSwitch
+  where
+    signatory issuer
+    observer assetAdmin, targetOwner
+
+    choice SubmitMint : ContractId MintRequest
+      controller issuer
+      do
+        assertNotPaused pauseCid
+        assertAssetEnabled directoryCid
+        assertAllowedIssuer permissionCid issuer
+        assertAllowedHolder permissionCid targetOwner
+        assertMsg "INVALID_MINT_QTY" (qty > 0.0)
+        create this
+
+    choice ApproveMint : ContractId Holding
+      controller assetAdmin, issuer
+      do
+        assertNotPaused pauseCid
+        assertAllowedIssuer permissionCid issuer
+        ---archive self
+        create Holding with
+          assetAdmin = assetAdmin
+          assetId = assetId
+          owner = targetOwner
+          amount = qty
+          directoryCid = directoryCid
+          permissionCid = permissionCid
+          pauseCid = pauseCid
+
+    nonconsuming choice CancelMint : ()
+      controller issuer
+      do
+        archive self
+
+
+        template BurnRequest
+  with
+    assetAdmin : Party
+    requestedBy : Party
+    holdingCid : ContractId Holding
+    qty : Decimal
+    directoryCid : ContractId Registry.AssetDirectory
+    permissionCid : ContractId Registry.AssetPermission
+    pauseCid : ContractId Governance.PauseSwitch
+  where
+    signatory requestedBy
+    observer assetAdmin
+
+    choice SubmitBurn : ContractId BurnRequest
+      controller requestedBy
+      do
+        assertNotPaused pauseCid
+        assertAssetEnabled directoryCid
+        h <- fetch holdingCid
+        perm <- fetch permissionCid
+        let isOwner = requestedBy == h.owner
+        let isIssuer = elem requestedBy perm.allowedIssuers
+        assertMsg "NOT_AUTHORIZED_TO_BURN" (isOwner || isIssuer)
+        assertMsg "INVALID_BURN_QTY" (qty > 0.0 && qty <= h.amount)
+        create this
+
+    choice ApproveBurn : ContractId Holding
+      controller assetAdmin
+      do
+        assertNotPaused pauseCid
+        h <- fetch holdingCid
+        assertMsg "BURN_TOO_LARGE" (qty <= h.amount)
+        --archive self
+        archive holdingCid
+        create h with amount = h.amount - qty
+
+    nonconsuming choice CancelBurn : ()
+      controller requestedBy
+      do
+        archive self
