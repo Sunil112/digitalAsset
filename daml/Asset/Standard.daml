@@ -1,11 +1,15 @@
 module Asset.Standard where
 
+-- Core asset contracts for holding issuance, transfers, mint/burn requests, and swap locks.
+-- Enforces governance, directory enablement, permission checks, and pause protection.
+
 import DA.Optional (fromSome)
 import Daml.Script
 
 import Common.Governance as Governance
 import Common.Registry as Registry
 
+-- Asset defines the root asset contract and issues new holdings under governance controls.
 template Asset
   with
     assetAdmin : Party
@@ -33,6 +37,7 @@ template Asset
           permissionCid = permissionCid
           pauseCid = pauseCid
 
+-- Holding represents an individual owner's asset balance with transfer and swap operations.
 template Holding
   with
     assetAdmin : Party
@@ -85,6 +90,7 @@ template Holding
         archive otherCid
         create this with amount = amount + other.amount
 
+    -- LockForSwap creates an escrowed lock contract for cross-party swap settlement.
     choice LockForSwap : ContractId Lock
       with
         escrow : Party
@@ -104,6 +110,7 @@ template Holding
           permissionCid = permissionCid
           pauseCid = pauseCid
 
+    -- Unlock returns the locked holding by exercising the corresponding Lock contract.
     choice Unlock : ContractId Holding
       with
         lockCid : ContractId Lock
@@ -118,6 +125,7 @@ template Holding
     ----------------------MINT Request--------------------------------
 
   
+-- MintRequest submits mint proposals and requires approval to create new holdings.
 template MintRequest
   with
     assetAdmin : Party
@@ -162,8 +170,8 @@ template MintRequest
       do
         archive self
 
-
-        template BurnRequest
+-- BurnRequest submits burn proposals for existing holdings and requires approval.
+template BurnRequest
   with
     assetAdmin : Party
     requestedBy : Party
