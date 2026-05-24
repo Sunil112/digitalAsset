@@ -117,6 +117,47 @@ template Holding
 
     ----------------------MINT Request--------------------------------
 
+  
+template MintRequest
+  with
+    assetAdmin : Party
+    assetId : Text
+    issuer : Party
+    targetOwner : Party
+    qty : Decimal
+    directoryCid : ContractId Registry.AssetDirectory
+    permissionCid : ContractId Registry.AssetPermission
+    pauseCid : ContractId Governance.PauseSwitch
+  where
+    signatory issuer
+    observer assetAdmin, targetOwner
 
+    choice SubmitMint : ContractId MintRequest
+      controller issuer
+      do
+        assertNotPaused pauseCid
+        assertAssetEnabled directoryCid
+        assertAllowedIssuer permissionCid issuer
+        assertAllowedHolder permissionCid targetOwner
+        assertMsg "INVALID_MINT_QTY" (qty > 0.0)
+        create this
 
-        
+    choice ApproveMint : ContractId Holding
+      controller assetAdmin, issuer
+      do
+        assertNotPaused pauseCid
+        assertAllowedIssuer permissionCid issuer
+        ---archive self
+        create Holding with
+          assetAdmin = assetAdmin
+          assetId = assetId
+          owner = targetOwner
+          amount = qty
+          directoryCid = directoryCid
+          permissionCid = permissionCid
+          pauseCid = pauseCid
+
+    nonconsuming choice CancelMint : ()
+      controller issuer
+      do
+        archive self
