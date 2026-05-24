@@ -161,3 +161,45 @@ template MintRequest
       controller issuer
       do
         archive self
+
+
+        template BurnRequest
+  with
+    assetAdmin : Party
+    requestedBy : Party
+    holdingCid : ContractId Holding
+    qty : Decimal
+    directoryCid : ContractId Registry.AssetDirectory
+    permissionCid : ContractId Registry.AssetPermission
+    pauseCid : ContractId Governance.PauseSwitch
+  where
+    signatory requestedBy
+    observer assetAdmin
+
+    choice SubmitBurn : ContractId BurnRequest
+      controller requestedBy
+      do
+        assertNotPaused pauseCid
+        assertAssetEnabled directoryCid
+        h <- fetch holdingCid
+        perm <- fetch permissionCid
+        let isOwner = requestedBy == h.owner
+        let isIssuer = elem requestedBy perm.allowedIssuers
+        assertMsg "NOT_AUTHORIZED_TO_BURN" (isOwner || isIssuer)
+        assertMsg "INVALID_BURN_QTY" (qty > 0.0 && qty <= h.amount)
+        create this
+
+    choice ApproveBurn : ContractId Holding
+      controller assetAdmin
+      do
+        assertNotPaused pauseCid
+        h <- fetch holdingCid
+        assertMsg "BURN_TOO_LARGE" (qty <= h.amount)
+        --archive self
+        archive holdingCid
+        create h with amount = h.amount - qty
+
+    nonconsuming choice CancelBurn : ()
+      controller requestedBy
+      do
+        archive self
