@@ -100,11 +100,10 @@ template SwapEscrow
         ps <- fetch pauseCid
         assertMsg "SYSTEM_PAUSED" (not ps.paused)
         assertMsg "LEG_A_ALREADY_LOCKED" (isNone lockA)
-        l <- exercise legA.holdingCid (A.LockForSwap with
+        l <- exercise legA.holdingCid A.LockForSwap with
           escrow = escrow
           counterparty = partyB
           qty = legA.qty
-        )
         ---archive self
         create this with lockA = Some l
 
@@ -114,11 +113,10 @@ template SwapEscrow
         ps <- fetch pauseCid
         assertMsg "SYSTEM_PAUSED" (not ps.paused)
         assertMsg "LEG_B_ALREADY_LOCKED" (isNone lockB)
-        l <- exercise legB.holdingCid (A.LockForSwap with
+        l <- exercise legB.holdingCid A.LockForSwap with
           escrow = escrow
           counterparty = partyA
           qty = legB.qty
-        )
         ---archive self
         create this with lockB = Some l
 
@@ -147,10 +145,10 @@ template SwapEscrow
           None -> pure ()
           Some l -> do
             _ <- exercise l A.ReturnLock
-            
+            pure ()
         case lockB of
           None -> pure ()
           Some l -> do
             _ <- exercise l A.ReturnLock
-            
+            pure ()
         ---archive self
