@@ -1,8 +1,13 @@
 module Common.Registry where
 
+-- Registry contracts for participants, asset directories, and permission management.
+-- Participant tracks registration and active state.
+-- AssetDirectory and AssetPermission manage asset enablement and holder/issuer authorization.
+
 import Daml.Script
 import DA.List(filter)
 
+-- Participant stores participant registration info and active state.
 template Participant
   with
     admin : Party
@@ -22,6 +27,7 @@ template Participant
       do
         create this with active = False
 
+-- AssetDirectory tracks asset registration, enablement status, and viewer permissions.
 template AssetDirectory
   with
     admin : Party
@@ -47,6 +53,7 @@ template AssetDirectory
       do
         create this with enabled = False
 
+-- AssetPermission controls which holders and issuers are authorized for an asset.
 template AssetPermission
   with
     admin : Party

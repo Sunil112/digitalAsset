@@ -1,9 +1,14 @@
 module Common.Governance where
 
+-- Governance contracts for admin roles and pause control in the digital asset system.
+-- AdminRole stores the system super-admin and admin list.
+-- PauseSwitch allows authorized parties to pause and resume the platform.
+
 import DA.List(filter)
 import Daml.Script
 import DA.Optional
 
+-- AdminRole tracks the system super-admin and admin list for governance operations.
 template AdminRole
   with
     superAdmin : Party
@@ -26,6 +31,7 @@ template AdminRole
       do
         create this with admins = filter (/= adminToRemove) admins
 
+-- PauseSwitch manages system pause/resume state and enforces admin authorization.
 template PauseSwitch
   with
     owner : Party

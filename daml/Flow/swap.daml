@@ -1,0 +1,154 @@
+module Flow.Swap where
+import Daml.Script
+import DA.Optional (isNone, isSome)
+
+import Asset.Standard as A
+import Common.Governance as G
+import Common.Registry as R
+
+-- SwapLeg contains one side of a proposed swap, including the holding and quantity.
+data SwapLeg = SwapLeg
+  {
+    holdingCid : ContractId A.Holding,
+    qty : Decimal,
+    assetAdmin : Party
+    }
+  deriving (Eq, Show)
+
+-- SwapRequest represents a proposed asset swap between two parties.
+template SwapRequest
+  with
+    partyA : Party
+    partyB : Party
+    escrow : Party
+    swapId : Text
+    expiry : Optional Time
+    legA : SwapLeg
+    legB : SwapLeg
+    pauseCid : ContractId G.PauseSwitch
+  where
+    signatory partyA
+    observer partyA,partyB, escrow, legA.assetAdmin, legB.assetAdmin
+
+    nonconsuming choice Propose : ()
+      controller partyA
+      do
+        ps <- fetch pauseCid
+        assertMsg "SYSTEM_PAUSED" (not ps.paused)
+        assertMsg "INVALID_SWAP_QTY" (legA.qty > 0.0 && legB.qty > 0.0)
+        pure ()
+
+    choice Cancel : ()
+      controller partyA
+      do
+        ps <- fetch pauseCid
+        assertMsg "SYSTEM_PAUSED" (not ps.paused)
+        ---archive self
+
+    choice Expire : ()
+      controller partyA, partyB
+      do
+        ps <- fetch pauseCid
+        assertMsg "SYSTEM_PAUSED" (not ps.paused)
+        now <- getTime
+        case expiry of
+          None -> abort "NO_EXPIRY_SET"
+          Some t -> assertMsg "NOT_EXPIRED_YET" (now > t)
+        ----archive self
+
+    choice Accept : ContractId SwapEscrow
+      controller partyB, escrow
+      do
+        ps <- fetch pauseCid
+        assertMsg "SYSTEM_PAUSED" (not ps.paused)
+        now <- getTime
+        case expiry of
+          None -> pure ()
+          Some t -> assertMsg "SWAP_EXPIRED" (now <= t)
+        create SwapEscrow with
+          partyA = partyA
+          partyB = partyB
+          escrow = escrow
+          swapId = swapId
+          legA = legA
+          legB = legB
+          lockA = None
+          lockB = None
+          pauseCid = pauseCid
+        ---archive self
+        ----pure escrowCid
+
+-- SwapEscrow tracks two swap legs and the resulting locks for atomic settlement.
+template SwapEscrow
+  with
+    partyA : Party
+    partyB : Party
+    escrow : Party
+    swapId : Text
+    legA : SwapLeg
+    legB : SwapLeg
+    lockA : Optional (ContractId A.Lock)
+    lockB : Optional (ContractId A.Lock)
+    pauseCid : ContractId G.PauseSwitch
+  where
+    signatory escrow
+    observer partyA, partyB, legA.assetAdmin, legB.assetAdmin
+
+    choice LockLegA : ContractId SwapEscrow
+      controller partyA, escrow, legA.assetAdmin
+      do
+        ps <- fetch pauseCid
+        assertMsg "SYSTEM_PAUSED" (not ps.paused)
+        assertMsg "LEG_A_ALREADY_LOCKED" (isNone lockA)
+        l <- exercise legA.holdingCid A.LockForSwap with
+          escrow = escrow
+          counterparty = partyB
+          qty = legA.qty
+        ---archive self
+        create this with lockA = Some l
+
+    choice LockLegB : ContractId SwapEscrow
+      controller partyB, escrow, legB.assetAdmin
+      do
+        ps <- fetch pauseCid
+        assertMsg "SYSTEM_PAUSED" (not ps.paused)
+        assertMsg "LEG_B_ALREADY_LOCKED" (isNone lockB)
+        l <- exercise legB.holdingCid A.LockForSwap with
+          escrow = escrow
+          counterparty = partyA
+          qty = legB.qty
+        ---archive self
+        create this with lockB = Some l
+
+    nonconsuming choice SettleAtomic : ()
+      controller escrow, legA.assetAdmin, legB.assetAdmin
+      do
+        ps <- fetch pauseCid
+        assertMsg "SYSTEM_PAUSED" (not ps.paused)
+        la <- case lockA of
+          None -> abort "LEG_A_NOT_LOCKED"
+          Some x -> pure x
+        lb <- case lockB of
+          None -> abort "LEG_B_NOT_LOCKED"
+          Some x -> pure x
+        _ <- exercise la A.ConsumeLock
+        _ <- exercise lb A.ConsumeLock
+        archive self
+        ----pure ()
+
+    choice Abort : ()
+      controller escrow, legA.assetAdmin, legB.assetAdmin
+      do
+        ps <- fetch pauseCid
+        assertMsg "SYSTEM_PAUSED" (not ps.paused)
+        case lockA of
+          None -> pure ()
+          Some l -> do
+            _ <- exercise l A.ReturnLock
+            pure ()
+        case lockB of
+          None -> pure ()
+          Some l -> do
+            _ <- exercise l A.ReturnLock
+            pure ()
+        ---archive self

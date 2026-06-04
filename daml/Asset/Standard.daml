@@ -1,47 +1,73 @@
-module Asset.Standard where
+﻿module Asset.Standard where
+
+-- Core asset contracts for holding issuance, transfers, mint/burn requests, and swap locks.
+-- Enforces governance, directory enablement, permission checks, and pause protection.
 
 import DA.Optional (fromSome)
 import Daml.Script
 
-import Common.Governance as Governance
-import Common.Registry as Registry
+import Common.Governance as G
+import Common.Registry as R
 
+-- Shared Guards
+assertNotPaused : ContractId G.PauseSwitch -> Update ()
+assertNotPaused pauseCid = do
+  ps <- fetch pauseCid
+  assertMsg "SYSTEM_PAUSED" (not ps.paused)
+
+assertAssetEnabled : ContractId R.AssetDirectory -> Update ()
+assertAssetEnabled dirCid = do
+  d <- fetch dirCid
+  assertMsg "ASSET_DISABLED" d.enabled
+
+assertAllowedHolder : ContractId R.AssetPermission -> Party -> Update ()
+assertAllowedHolder permCid p = do
+  perm <- fetch permCid
+  assertMsg "NOT_ALLOWED_HOLDER" (elem p perm.allowedHolders)
+
+assertAllowedIssuer : ContractId R.AssetPermission -> Party -> Update ()
+assertAllowedIssuer permCid p = do
+  perm <- fetch permCid
+  assertMsg "NOT_ALLOWED_ISSUER" (elem p perm.allowedIssuers)
+
+-- Asset defines the root asset contract and issues new holdings under governance controls.
 template Asset
   with
     assetAdmin : Party
     assetId : Text
-    directoryCid : ContractId Registry.AssetDirectory
-    permissionCid : ContractId Registry.AssetPermission
-    pauseCid : ContractId Governance.PauseSwitch
+    directoryCid : ContractId R.AssetDirectory
+    permissionCid : ContractId R.AssetPermission
+    pauseCid : ContractId G.PauseSwitch
   where
     signatory assetAdmin
 
     choice CreateHolding : ContractId Holding
       with
-        Owner : Party
+        owner : Party
       controller assetAdmin
       do
         assertNotPaused pauseCid
         assertAssetEnabled directoryCid
-        assertAllowedHolder permissionCid Owner
+        assertAllowedHolder permissionCid owner
         create Holding with
           assetAdmin = assetAdmin
           assetId = assetId
-          owner = Owner
+          owner = owner
           amount = 0.0
           directoryCid = directoryCid
           permissionCid = permissionCid
           pauseCid = pauseCid
 
+-- Holding represents an individual owner's asset balance with transfer and swap operations.
 template Holding
   with
     assetAdmin : Party
     assetId : Text
     owner : Party
     amount : Decimal
-    directoryCid : ContractId Registry.AssetDirectory
-    permissionCid : ContractId Registry.AssetPermission
-    pauseCid : ContractId Governance.PauseSwitch
+    directoryCid : ContractId R.AssetDirectory
+    permissionCid : ContractId R.AssetPermission
+    pauseCid : ContractId G.PauseSwitch
   where
     signatory assetAdmin
     observer owner
@@ -59,8 +85,8 @@ template Holding
         assertAllowedHolder permissionCid receiver
         assertMsg "INVALID_TRANSFER_AMOUNT" (qty > 0.0 && qty <= amount)
 
-        recv <- create this with owner = receiver; amount = qty
-        change <- create this with owner = owner; amount = amount - qty
+        recv <- create this with owner = receiver, amount = qty
+        change <- create this with owner = owner, amount = amount - qty
         pure (recv, change)
 
     choice Split : (ContractId Holding, ContractId Holding)
@@ -85,12 +111,17 @@ template Holding
         archive otherCid
         create this with amount = amount + other.amount
 
+    -- LockForSwap creates an escrowed lock contract for cross-party swap settlement.
     choice LockForSwap : ContractId Lock
       with
         escrow : Party
         counterparty : Party
+        qty : Decimal
       controller assetAdmin, owner, escrow
       do
+        assertNotPaused pauseCid
+        assertAssetEnabled directoryCid
+        assertAllowedHolder permissionCid counterparty
         assertMsg "INVALID_LOCK" (qty > 0.0 && qty <= amount)
         change <- create this with amount = amount - qty
         create Lock with
@@ -104,6 +135,7 @@ template Holding
           permissionCid = permissionCid
           pauseCid = pauseCid
 
+    -- Unlock returns the locked holding by exercising the corresponding Lock contract.
     choice Unlock : ContractId Holding
       with
         lockCid : ContractId Lock
@@ -112,12 +144,7 @@ template Holding
       do
         exercise lockCid ReturnLock
 
-
-
-
-    ----------------------MINT Request--------------------------------
-
-  
+-- MintRequest submits mint proposals and requires approval to create new holdings.
 template MintRequest
   with
     assetAdmin : Party
@@ -125,9 +152,9 @@ template MintRequest
     issuer : Party
     targetOwner : Party
     qty : Decimal
-    directoryCid : ContractId Registry.AssetDirectory
-    permissionCid : ContractId Registry.AssetPermission
-    pauseCid : ContractId Governance.PauseSwitch
+    directoryCid : ContractId R.AssetDirectory
+    permissionCid : ContractId R.AssetPermission
+    pauseCid : ContractId G.PauseSwitch
   where
     signatory issuer
     observer assetAdmin, targetOwner
@@ -147,7 +174,7 @@ template MintRequest
       do
         assertNotPaused pauseCid
         assertAllowedIssuer permissionCid issuer
-        ---archive self
+        archive self
         create Holding with
           assetAdmin = assetAdmin
           assetId = assetId
@@ -162,16 +189,16 @@ template MintRequest
       do
         archive self
 
-
-        template BurnRequest
+-- BurnRequest submits burn proposals for existing holdings and requires approval.
+template BurnRequest
   with
     assetAdmin : Party
     requestedBy : Party
     holdingCid : ContractId Holding
     qty : Decimal
-    directoryCid : ContractId Registry.AssetDirectory
-    permissionCid : ContractId Registry.AssetPermission
-    pauseCid : ContractId Governance.PauseSwitch
+    directoryCid : ContractId R.AssetDirectory
+    permissionCid : ContractId R.AssetPermission
+    pauseCid : ContractId G.PauseSwitch
   where
     signatory requestedBy
     observer assetAdmin
@@ -195,7 +222,7 @@ template MintRequest
         assertNotPaused pauseCid
         h <- fetch holdingCid
         assertMsg "BURN_TOO_LARGE" (qty <= h.amount)
-        --archive self
+        archive self
         archive holdingCid
         create h with amount = h.amount - qty
 
@@ -203,3 +230,50 @@ template MintRequest
       controller requestedBy
       do
         archive self
+
+template Lock
+  with
+    assetAdmin : Party
+    assetId : Text
+    fromOwner : Party
+    toOwner : Party
+    qty : Decimal
+    escrow : Party
+    directoryCid : ContractId R.AssetDirectory
+    permissionCid : ContractId R.AssetPermission
+    pauseCid : ContractId G.PauseSwitch
+  where
+    signatory escrow
+    observer assetAdmin, fromOwner, toOwner
+    ensure qty > 0.0
+
+    choice ConsumeLock : ContractId Holding
+      controller escrow, assetAdmin
+      do
+        -- POC workaround: skip mutable-contract fetches during swap settlement.
+        assertNotPaused pauseCid
+        assertAllowedHolder permissionCid toOwner
+        archive self
+        create Holding with
+          assetAdmin = assetAdmin
+          assetId = assetId
+          owner = toOwner
+          amount = qty
+          directoryCid = directoryCid
+          permissionCid = permissionCid
+          pauseCid = pauseCid
+
+    choice ReturnLock : ContractId Holding
+      controller escrow, assetAdmin
+      do
+        -- POC workaround: skip mutable-contract fetches during swap abort.
+        assertNotPaused pauseCid
+        archive self
+        create Holding with
+          assetAdmin = assetAdmin
+          assetId = assetId
+          owner = fromOwner
+          amount = qty
+          directoryCid = directoryCid
+          permissionCid = permissionCid
+          pauseCid = pauseCid
