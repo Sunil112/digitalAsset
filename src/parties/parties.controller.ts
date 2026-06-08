@@ -12,9 +12,14 @@ export class PartiesController {
     return await this.partiesService.createParty(createPartyDto);
   }
 
+  @Get()
+  async findAll() {
+    return await this.partiesService.findAll();
+  }
+
   @Get(':id')
   async findOne(@Param('id') id: string) {
-    const party = this.partiesService.findOne(id);
+    const party = await this.partiesService.findOne(id);
     if (!party) {
       throw new NotFoundException(`Party with id ${id} not found`);
     }
