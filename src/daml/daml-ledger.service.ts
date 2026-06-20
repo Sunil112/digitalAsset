@@ -19,15 +19,22 @@ interface DamlJsonApiError {
   };
 }
 
-export interface DamlContract<T = any> {
+interface DamlDamlCreatedContract {
   contractId: string;
-  payload: T;
+  payload: JsonObject;
 }
 
-export interface ParticipantPayload {
-  admin: string;
-  participant: string;
-  active: boolean;
+interface DamlParty{
+  identfier:string;
+  displayName?:string;
+  isLocal:boolean;
+}
+
+interface FetchErrorWithCause extends Error {
+  cause?:{
+    code?:string;
+    address?:string;
+  }
 }
 
 export interface DamlHoldingSummary {
@@ -42,112 +49,150 @@ export interface DamlHoldingSummary {
 export class DamlService {
   private readonly logger = new Logger(DamlService.name);
   private readonly baseUrl = process.env.DAML_JSON_API_URL?.replace(/\/+$/, "");
+  private readonly requestTimeoutMs= Number(process.env.DAML_REQUEST_TIMEOUT_MS) ?? 5000;
+  private readonly participantTemplateId = process.env.DAML_PARTICIPANT ?? "Common.Registry.Participant";
+  private readonly kycApplicationTemplateId = process.env.DAML_KYC_APPLICATION ?? "Common.Registry.KycApplication";
+  private readonly assetDirectoryTemplateId = process.env.DAML_ASSET_DIRECTORY ?? "Common.Registry.AssetDirectory";
+  private readonly assetPermissionTemplateId = process.env.DAML_ASSET_PERMISSION ?? "Common.Registry.AssetPermission";
+  private readonly adminRoleTemplateId = process.env.DAML_ADMIN_ROLE ?? "Common.Governance.AdminRole";
+  private readonly pauseSwitchTemplateId = process.env.DAML_PAUSE_SWITCH ?? "Common.Governance.PauseSwitch";
+  private readonly mintRequestTemplateId = process.env.DAML_MINT_REQUEST ?? "Asset.Standard.MintRequest";
+  private readonly burnRequestTemplateId = process.env.DAML_BURN_REQUEST ?? "Asset.Standard.BurnRequest";
+  private readonly swapRequestTemplateId = process.env.DAML_SWAP_REQUEST ?? "Flow.Swap.SwapRequest";
+  private readonly swapEscrowTemplateId = process.env.DAML_SWAP_ESCROW ?? "Flow.Swap.SwapEscrow";
+  private readonly v1CompatibilityWarning = 
+  'Legacy DAML JSON API endpoints ("/v1/") are deprecated and will be removed in a future release. Please update to the new endpoints ("/v2/") and ensure your Daml JSON API is version 2.0.0 or later.';
+  private readonly unKnownSubmitterWarning = 
+  'DAML JSON API request did not specify a submitter party. Ensure that your requests include a valid submitter and that the DAML_ADMIN_PARTY environment variable is set correctly if using the default participant template.';
 
-  private get requestUrls(): string[] {
+  private getRequestUrls(endpoint: string): string[] {
     if (!this.baseUrl) {
       return [];
     }
 
+    const primaryUrl = '${this.baseUrl}${endpoint}';
+
     if (!this.baseUrl.includes("localhost")) {
-      return [this.baseUrl];
+      return [primaryUrl];
     }
 
-    return [this.baseUrl, this.baseUrl.replace("localhost", "127.0.0.1")];
+    return [primaryUrl, `${this.baseUrl.replace("localhost", "127.0.0.1")}${endpoint}`];  
   }
 
-  private get headers(): Record<string, string> {
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-    };
-
-    if (process.env.DAML_JSON_API_TOKEN) {
-      headers.Authorization = "Bearer " + process.env.DAML_JSON_API_TOKEN;
-    }
-
-    return headers;
+  private get token(): string | undefined {
+    return process.env.DAML_JSON_API_TOKEN;
   }
 
-  private async fetchJson<T>(endpoint: string, body: JsonObject): Promise<T> {
-    if (this.requestUrls.length === 0) {
-      throw new ServiceUnavailableException("DAML_JSON_API_URL is not configured");
-    }
-
-    const fetchFn = (globalThis as any).fetch;
-    if (!fetchFn) {
-      throw new InternalServerErrorException("Global fetch is not available in this runtime. Use Node 18+ or add a fetch polyfill.");
-    }
-
-    let lastError: unknown;
-
-    for (const baseUrl of this.requestUrls) {
-      const url = baseUrl + endpoint;
-      try {
-        const response = await fetchFn(url, {
-          method: "POST",
-          headers: this.headers,
-          body: JSON.stringify(body),
-        });
-
-        const json = await response.json();
-        if (!response.ok) {
-          const apiError = json as DamlJsonApiError;
-          const errorMessage = Array.isArray(apiError.errors)
-            ? apiError.errors.join("; ")
-            : JSON.stringify(json);
-          this.logger.warn("Daml JSON API returned " + response.status + ": " + errorMessage);
-          throw new Error(errorMessage);
-        }
-
-        return json as T;
-      } catch (error) {
-        lastError = error;
-        this.logger.warn("Daml JSON API request failed for " + url + ": " + error);
-      }
-    }
-
-    throw new ServiceUnavailableException(
-      "Daml JSON API is unavailable. Last error: " + (lastError ?? "unknown"),
-    );
-  }
-
-  async createParticipant(participant: string, active = true): Promise<DamlContract<ParticipantPayload>> {
-    const adminParty = process.env.DAML_ADMIN_PARTY || participant;
-    const payload = {
-      templateId: {
-        moduleName: "Common.Registry",
-        entityName: "Participant",
-      },
-      payload: {
-        admin: adminParty,
-        participant,
-        active,
-      },
-      party: adminParty,
-    };
-
-    return await this.fetchJson<DamlContract<ParticipantPayload>>("/v1/create", payload);
-  }
-
-  async listParticipants(): Promise<DamlContract<ParticipantPayload>[]> {
-    const queryBody = {
-      templateIds: [
-        {
-          moduleName: "Common.Registry",
-          entityName: "Participant",
-        },
-      ],
-      query: {},
-    };
-
-    const result = await this.fetchJson<DamlJsonApiSuccess<DamlContract<ParticipantPayload>[]>>("/v1/query", queryBody);
-    return result.result;
+  private get adminParty(): string | undefined {
+    return process.env.DAML_ADMIN_PARTY;
   }
 
   isEnabled(): boolean {
-    return process.env.DAML_ENABLED?.toLowerCase() === "true" && Boolean(this.baseUrl);
+    return process.env.DAML_ENABLED === "true" && Boolean(this.baseUrl);
   }
 
   hasParticipantSyncConfig(): boolean {
-    return this.isEnabled() && Boolean(process.env.DAML_ADMIN_PARTY);
+    return this.isEnabled() && Boolean(this.adminParty);
   }
+
+
+
+  // private get requestUrls(): string[] {
+  //   if (!this.baseUrl) {
+  //     return [];
+  //   }
+
+  //   if (!this.baseUrl.includes("localhost")) {
+  //     return [this.baseUrl];
+  //   }
+
+  //   return [this.baseUrl, this.baseUrl.replace("localhost", "127.0.0.1")];
+  // }
+
+  // private get headers(): Record<string, string> {
+  //   const headers: Record<string, string> = {
+  //     "Content-Type": "application/json",
+  //   };
+
+  //   if (process.env.DAML_JSON_API_TOKEN) {
+  //     headers.Authorization = "Bearer " + process.env.DAML_JSON_API_TOKEN;
+  //   }
+
+  //   return headers;
+  // }
+
+  async assertReady(): Promise<void> {
+    if (!this.isEnabled()) return;
+
+    const retries= 10;
+    const readyUrls = this.getRequestUrls('/readyz');
+    const liveUrls = this.getRequestUrls('/livez');
+
+    for (let i = 0; i < retries; i++) {
+      try {
+        let healthy = false;
+
+        for (const url of [...readyUrls, ...liveUrls]) {
+          const response = await this.fetchWithTimeout(url, { method: "GET" });
+          if (response.ok) {
+            healthy = true;
+            break;
+          }
+        }
+
+        if (healthy) {
+          this.logger.log("Daml JSON API is healthy");
+
+          //warm-up query
+          await this.post('v1/query', {
+            templateIds: [this.participantTemplateId],    
+            query: {},  
+          });
+          this.logger.log('DAML command pipeline ready');
+          return;
+        }
+      } catch (err) {
+        const message = err as instanceof Error ? err.message : String(err);
+        this.logger.warn('Waiting for DAML Json API(attempt ${i+1}): ${message}' );
+      }
+
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+
+    throw new ServiceUnavailableException(
+      'Daml JSON API is not ready after ${retries} attempts'
+    );
+  }
+
+
+  getPartipantAdminParty(): string {
+    if (!this.adminParty) {
+      throw new InternalServerErrorException(
+        'DAML_ADMIN_PARTY is required for participant synchronization but is not set in the environment variables.'   
+      );
+    }
+    return this.adminParty;
+  }
+  private isFullpartyidentifier(value: string): boolean {
+    return value.includes('::');
+  }
+
+
+          
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 }
