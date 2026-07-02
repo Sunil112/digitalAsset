@@ -165,7 +165,7 @@ export class DamlService {
   }
 
 
-  getPartipantAdminParty(): string {
+  getPartipantAdmin(): string {
     if (!this.adminParty) {
       throw new InternalServerErrorException(
         'DAML_ADMIN_PARTY is required for participant synchronization but is not set in the environment variables.'   
@@ -177,8 +177,59 @@ export class DamlService {
     return value.includes('::');
   }
 
+  private async resolvePartyIdentifier(value: string): Promise<string> {
+    const trimmedValue =value.trim();
+    if(!trimmedValue){
+      throw new InternalServerErrorException('Party identifier is empty or whitespace.');
+    }
 
+    const parties = await this.get<DamlParty[]>('v1/parties');
+    const identiferHint = this.isFullpartyidentifier(trimmedValue)
+     ? trimmedValue.split('::')[0]
+     : trimmedValue;
+
+     const existingParty =parties.find(party) =>{
+      const shortIdentifier = party.identfier.split('::')[0];
+      return {
+        party.identifier === trimmedValue ||
+        party.displayName === trimmedValue 
+        shortIdentifier === identiferHint || 
+        shortIdentifier === trimmedValue
+      );
+    });
+       
+    if(existingParty){
+      return existingParty.identfier;
+    }
+
+    const allocated = await this.post<DamlParty>('v1/parties/allocate', {
+      identifierHint,
+      displayName: identifierHint,
+    });
+    
+    this.logger.log('Allocated new party: ${allocated.identifier} with display name: ${allocated.displayName}');
+    return allocated.identifier;
+  }
           
+
+
+
+  async createParticipant(participant: string, active=false): Promise<DamlCreatedContract> {
+    const resolvedAdmin = await this.resolvePartyIdentifier(this.getPartipantAdmin());
+    const resolvedParticipant = await this.resolvePartyIdentifier(participant);
+
+    const contract= await this.create(this.participantTemplateId, {
+      admin: resolvedAdmin,
+      participant: resolvedParticipant,
+      active
+    });
+
+    this.logger.log(
+      `Created participant contract with ID: ${contract.contractId}`
+    );
+    
+    return contract;
+  }
 
 
 
