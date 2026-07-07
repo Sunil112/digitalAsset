@@ -3,7 +3,7 @@ import { promises as fs } from 'fs';
 import { randomUUID } from 'crypto';
 import { dirname, join, resolve } from 'path';
 import { CreatePartyDto } from './dto/create-party.dto';
-import { DamlService, ParticipantPayload } from '../daml/daml-ledger.service';
+import { DamlLedgerService } from '../daml/daml-ledger.service';
 
 export interface Party {
   id: string;
@@ -47,26 +47,17 @@ export class PartiesService {
     return party;
   }
 
+  async getAllParties(): Promise<Party[]> {
+    await this.ensureInitialized();
+    return Array.from(this.parties.values());
+  }
+
+
   async findOne(id: string): Promise<Party | undefined> {
     await this.ensureInitialized();
     return this.parties.get(id);
   }
 
-  async findAll(): Promise<Party[]> {
-    await this.ensureInitialized();
-    const damlParticipants = await this.damlService.listParticipants();
-
-    return Array.from(this.parties.values()).map((party) => {
-      const contract = damlParticipants.find(
-        (item) => item.payload.participant === party.partyId,
-      );
-      return {
-        ...party,
-        damlContractId: contract?.contractId,
-        active: contract?.payload.active ?? party.active,
-      };
-    });
-  }
 
   private async ensureInitialized(): Promise<void> {
     if (!this.initPromise) {

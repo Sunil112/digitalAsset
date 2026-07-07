@@ -6,23 +6,23 @@ import { PartiesService } from './parties.service';
 export class PartiesController {
   constructor(private readonly partiesService: PartiesService) {}
 
-  @Post()
+
+
+  @Post('parties')
   @HttpCode(HttpStatus.CREATED)
-  async create(@Body() createPartyDto: CreatePartyDto) {
+  async createParty(@Body() createPartyDto: CreatePartyDto) {
     return await this.partiesService.createParty(createPartyDto);
   }
 
-  @Get()
-  async findAll() {
-    return await this.partiesService.findAll();
+  @Get('parties')
+  async getAllParties() {
+    return await this.partiesService.getAllParties();
   }
 
-  @Get(':id')
+  @Get('parties/:id')
   async findOne(@Param('id') id: string) {
-    const party = await this.partiesService.findOne(id);
-    if (!party) {
-      throw new NotFoundException(`Party with id ${id} not found`);
-    }
-    return party;
+    return await this.partiesService.findOne(id);
   }
+
+
 }
