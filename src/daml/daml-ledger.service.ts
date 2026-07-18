@@ -231,6 +231,76 @@ export class DamlService {
     return contract;
   }
 
+  async findParticipantContract(participant: string): Promise<DamlCreatedContract | null> {
+    const resolvedAdmin = await this.resolvePartyIdentifier(this.getPartipantAdmin());
+    const resolvedParticipant = await this.resolvePartyIdentifier(participant);
+
+    const results = await this.query<DamlCreatedContract>(this.participantTemplateId, {
+      admin: resolvedAdmin,
+      participant: resolvedParticipant
+    });
+
+    return results[0] ?? null;
+  }
+
+  async activateParticipant(participant: string): Promise<string> {
+    const contract = await this.findParticipantContract(participant);
+    if (!contract) {
+      const createdContract = await this.createParticipant(participant, true);
+      return createdContract.contractId;
+    }
+
+    const activatedContract = await this.exercise<string>(
+      this.participantTemplateId, 
+      contract.contractId, 
+      'Activate', 
+      {},
+    );
+      
+    this.logger.log(
+      `Activated participant contract with ID: ${activatedContract}`    
+    );
+
+    return activatedContract;
+    }
+
+    async deactivateParticipant(participant: string): Promise<string> {
+      const contract = await this.findParticipantContract(participant);
+      if (!contract) {
+        throw new ServiceUnavailableException(`Participant contract for ${participant} not found`);
+      }
+
+      const deactivatedContract = await this.exercise<string>(
+        this.participantTemplateId, 
+        contract.contractId, 
+        'Deactivate', 
+        {},
+      );
+      
+      this.logger.log(
+        `Deactivated participant contract with ID: ${deactivatedContract}`    
+      );
+      return deactivatedContract;
+    } 
+
+
+
+
+    // ---------------------------
+private async fetchWithTimeout(url: string, options: RequestInit): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), this.requestTimeoutMs);
+  try{
+    return await fetch(url, {
+       ...options, signal: controller.signal,
+      });
+  } finally {
+    clearTimeout(timeoutId);  
+  }
+}
+
+
+  
 
 
 
