@@ -1,25 +1,23 @@
-import{ IsString, IsNotEmpty, IsEnum, IsOptional } from 'class-validator';
-import { PartyType } from  '../types/party.types';
+import { IsEnum, IsNotEmpty, IsOptional, IsString } from 'class-validator';
+import { PartyType } from '../types/party.types';
 
 export class CreatePartyDto {
-  
-    @IsString()
-    @IsNotEmpty()
-    partyId: string;
+  @IsString()
+  @IsNotEmpty()
+  partyId!: string;
 
-    @IsString()
-    @IsNotEmpty()
-    organizationName: string;
+  @IsString()
+  @IsNotEmpty()
+  organizationName!: string;
 
-    @IsEnum(PartyType)
-    @IsNotEmpty()
-    partyType: PartyType;
+  @IsEnum(PartyType)
+  @IsNotEmpty()
+  partyType!: PartyType;
 
-    @IsOptional()
-    leiCode?: string;
+  @IsOptional()
+  @IsString()
+  leiCode?: string;
 
-    @IsOptional()
-    @IsString()
-    metadata?: string;
-
+  @IsOptional()
+  metadata?: Record<string, any> | string;
 }
