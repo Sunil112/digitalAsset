@@ -51,7 +51,7 @@ export class PartiesService {
       leiCode: createPartyDto.leiCode,
       metadata: this.normalizeMetadata(createPartyDto.metadata),
       damlContractId: damlContract?.contractId,
-      active: Boolean(damlContract?.payload.active),
+      active: damlContract ? Boolean(damlContract.payload.active) : true,
       status: PartyStatus.ACTIVE,
     };
 
@@ -67,8 +67,36 @@ export class PartiesService {
 
   async findOne(id: string): Promise<Party | undefined> {
     await this.ensureInitialized();
-    const normalizedId = id.trim();
-    return Array.from(this.parties.values()).find((party) => party.id === normalizedId || party.partyId === normalizedId);
+    return this.findPartyByIdentifier(id);
+  }
+
+  async getParty(id: string): Promise<Party> {
+    await this.ensureInitialized();
+
+    const party = this.findPartyByIdentifier(id);
+    if (!party) {
+      throw new NotFoundException(`Party with identifier ${id} was not found.`);
+    }
+
+    if (!this.damlLedgerService.hasParticipantSyncConfig()) {
+      return party;
+    }
+
+    try {
+      const contract = await this.damlLedgerService.findParticipantContract(party.partyId);
+      if (contract) {
+        party.damlContractId = contract.contractId;
+        const isActive = Boolean(contract.payload?.active);
+        party.active = isActive;
+        party.status = isActive ? PartyStatus.ACTIVE : PartyStatus.DEACTIVATED;
+        this.parties.set(party.id, party);
+        await this.saveDataToDisk();
+      }
+    } catch (error) {
+      this.logger.warn(`DAML lookup failed for ${party.partyId}: ${String(error)}`);
+    }
+
+    return party;
   }
 
   private normalizeMetadata(metadata?: string | Record<string, any>): Record<string, any> | undefined {
@@ -119,7 +147,7 @@ export class PartiesService {
   async activateParty(partyId: string): Promise<Party> {
     await this.ensureInitialized();
 
-    const party = Array.from(this.parties.values()).find((candidate) => candidate.id === partyId || candidate.partyId === partyId);
+    const party = this.findPartyByIdentifier(partyId);
     if (!party) {
       throw new NotFoundException(`Party with identifier ${partyId} was not found.`);
     }
@@ -153,5 +181,51 @@ export class PartiesService {
     this.parties.set(party.id, party);
     await this.saveDataToDisk();
     return party;
+  }
+
+  async deactivateParty(partyId: string): Promise<Party> {
+    await this.ensureInitialized();
+
+    const party = this.findPartyByIdentifier(partyId);
+    if (!party) {
+      throw new NotFoundException(`Party with identifier ${partyId} was not found.`);
+    }
+
+    if (party.status === PartyStatus.DEACTIVATED) {
+      return party;
+    }
+
+    try {
+      if (this.damlLedgerService.hasParticipantSyncConfig()) {
+        const contractId = await this.damlLedgerService.deactivateParticipant(party.partyId);
+        party.damlContractId = contractId;
+      }
+
+      party.status = PartyStatus.DEACTIVATED;
+      party.active = false;
+      party.metadata = {
+        ...(party.metadata ?? {}),
+        damlSyncStatus: this.damlLedgerService.hasParticipantSyncConfig() ? 'SYNCED' : 'SKIPPED',
+      };
+    } catch (error) {
+      this.logger.warn(`DAML deactivation failed for ${party.partyId}: ${String(error)}`);
+      party.status = PartyStatus.DEACTIVATED;
+      party.active = false;
+      party.metadata = {
+        ...(party.metadata ?? {}),
+        damlSyncStatus: 'LOCAL_ONLY',
+      };
+    }
+
+    this.parties.set(party.id, party);
+    await this.saveDataToDisk();
+    return party;
+  }
+
+  private findPartyByIdentifier(identifier: string): Party | undefined {
+    const normalizedId = identifier.trim();
+    return Array.from(this.parties.values()).find(
+      (party) => party.id === normalizedId || party.partyId === normalizedId,
+    );
   }
 }
