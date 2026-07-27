@@ -1,4 +1,5 @@
 import { Injectable, InternalServerErrorException, Logger, ServiceUnavailableException } from '@nestjs/common';
+import * as crypto from 'crypto';
 
 type JsonObject = Record<string, unknown>;
 
@@ -81,6 +82,32 @@ export class DamlService {
     return process.env.DAML_ADMIN_PARTY;
   }
 
+  private get jwtSecret(): string | undefined {
+    return process.env.DAML_JWT_SECRET;
+  }
+
+  private generateTokenForParties(parties: string[]): string | undefined {
+    const secret = this.jwtSecret;
+    if (!secret) return undefined;
+
+    const now = Math.floor(Date.now() / 1000);
+    const payload: any = {
+      exp: now + 60 * 60,
+      'https://daml.com/ledger-api': {
+        ledgerId: process.env.DAML_LEDGER_ID ?? 'sandbox',
+        applicationId: process.env.DAML_APPLICATION_ID ?? 'digitalAsset',
+        actAs: parties,
+        readAs: parties,
+      },
+    };
+
+    const header = { alg: 'HS256', typ: 'JWT' };
+    const base64url = (obj: any) => Buffer.from(JSON.stringify(obj)).toString('base64').replace(/=+$/,'').replace(/\+/g,'-').replace(/\//g,'_');
+    const unsigned = `${base64url(header)}.${base64url(payload)}`;
+    const sig = crypto.createHmac('sha256', secret).update(unsigned).digest('base64').replace(/=+$/,'').replace(/\+/g,'-').replace(/\//g,'_');
+    return `${unsigned}.${sig}`;
+  }
+
   isEnabled(): boolean {
     return process.env.DAML_ENABLED === 'true' && Boolean(this.baseUrl);
   }
@@ -149,7 +176,8 @@ export class DamlService {
       throw new InternalServerErrorException('Party identifier is empty or whitespace.');
     }
 
-    const parties = await this.get<DamlParty[]>('v1/parties');
+    const partiesResponse = await this.get<DamlParty[] | DamlJsonApiSuccess<DamlParty[]>>('v1/parties');
+    const parties = this.unwrapResult<DamlParty[]>(partiesResponse);
     const identifierHint = this.isFullPartyIdentifier(trimmedValue) ? trimmedValue.split('::')[0] : trimmedValue;
 
     const existingParty = parties.find((party) => {
@@ -162,10 +190,11 @@ export class DamlService {
       return existingParty.identifier ?? existingParty.identfier ?? trimmedValue;
     }
 
-    const allocated = await this.post<DamlParty>('v1/parties/allocate', {
+    const allocatedResponse = await this.post<DamlParty | DamlJsonApiSuccess<DamlParty>>('v1/parties/allocate', {
       identifierHint,
       displayName: identifierHint,
     });
+    const allocated = this.unwrapResult<DamlParty>(allocatedResponse);
 
     const allocatedIdentifier = allocated.identifier ?? allocated.identfier ?? identifierHint;
     this.logger.log(`Allocated new party: ${allocatedIdentifier}`);
@@ -176,11 +205,13 @@ export class DamlService {
     const resolvedAdmin = await this.resolvePartyIdentifier(this.getPartipantAdmin());
     const resolvedParticipant = await this.resolvePartyIdentifier(participant);
 
+    const token = this.generateTokenForParties([resolvedAdmin, resolvedParticipant]);
+
     const contract = await this.create<DamlCreatedContract>(this.participantTemplateId, {
       admin: resolvedAdmin,
       participant: resolvedParticipant,
       active,
-    });
+    }, token);
 
     this.logger.log(`Created participant contract with ID: ${contract.contractId}`);
     return contract;
@@ -190,10 +221,11 @@ export class DamlService {
     const resolvedAdmin = await this.resolvePartyIdentifier(this.getPartipantAdmin());
     const resolvedParticipant = await this.resolvePartyIdentifier(participant);
 
+    const token = this.generateTokenForParties([resolvedAdmin, resolvedParticipant]);
     const results = await this.query<DamlCreatedContract>(this.participantTemplateId, {
       admin: resolvedAdmin,
       participant: resolvedParticipant,
-    });
+    }, token);
 
     return results[0] ?? null;
   }
@@ -204,12 +236,15 @@ export class DamlService {
       const createdContract = await this.createParticipant(participant, true);
       return createdContract.contractId;
     }
-
+    const resolvedAdmin = await this.resolvePartyIdentifier(this.getPartipantAdmin());
+    const resolvedParticipant = await this.resolvePartyIdentifier(participant);
+    const token = this.generateTokenForParties([resolvedAdmin, resolvedParticipant]);
     const activatedContract = await this.exercise<string>(
       this.participantTemplateId,
       contract.contractId,
       'Activate',
       {},
+      token,
     );
 
     this.logger.log(`Activated participant contract with ID: ${activatedContract}`);
@@ -221,49 +256,60 @@ export class DamlService {
     if (!contract) {
       throw new ServiceUnavailableException(`Participant contract for ${participant} not found`);
     }
-
+    const resolvedAdmin = await this.resolvePartyIdentifier(this.getPartipantAdmin());
+    const resolvedParticipant = await this.resolvePartyIdentifier(participant);
+    const token = this.generateTokenForParties([resolvedAdmin, resolvedParticipant]);
     const deactivatedContract = await this.exercise<string>(
       this.participantTemplateId,
       contract.contractId,
       'Deactivate',
       {},
+      token,
     );
 
     this.logger.log(`Deactivated participant contract with ID: ${deactivatedContract}`);
     return deactivatedContract;
   }
 
-  private async get<T>(endpoint: string): Promise<T> {
-    return this.request<T>('GET', endpoint);
+  private async get<T>(endpoint: string, token?: string): Promise<T> {
+    return this.request<T>('GET', endpoint, undefined, token);
   }
 
-  private async post<T>(endpoint: string, body?: JsonObject): Promise<T> {
-    return this.request<T>('POST', endpoint, body);
+  private async post<T>(endpoint: string, body?: JsonObject, token?: string): Promise<T> {
+    return this.request<T>('POST', endpoint, body, token);
   }
 
-  private async create<T>(templateId: string, payload: JsonObject): Promise<T> {
-    return this.post<T>('v1/create', { templateId, payload });
+  private async create<T>(templateId: string, payload: JsonObject, token?: string): Promise<T> {
+    const response = await this.post<T | DamlJsonApiSuccess<T>>('v1/create', { templateId, payload }, token);
+    return this.unwrapResult<T>(response);
   }
 
-  private async query<T>(templateId: string, query: JsonObject): Promise<T[]> {
-    const response = await this.post<DamlJsonApiSuccess<T[]>>('v1/query', {
+  private async query<T>(templateId: string, query: JsonObject, token?: string): Promise<T[]> {
+    const response = await this.post<T[] | DamlJsonApiSuccess<T[]>>('v1/query', {
       templateIds: [templateId],
       query,
-    });
-    return response.result ?? [];
+    }, token);
+    return this.unwrapResult<T[]>(response) ?? [];
   }
 
-  private async exercise<T>(templateId: string, contractId: string, choice: string, argument: JsonObject): Promise<T> {
-    const response = await this.post<DamlJsonApiSuccess<T>>('v1/exercise', {
+  private async exercise<T>(templateId: string, contractId: string, choice: string, argument: JsonObject, token?: string): Promise<T> {
+    const response = await this.post<T | DamlJsonApiSuccess<T>>('v1/exercise', {
       templateId,
       contractId,
       choice,
       argument,
-    });
-    return response.result;
+    }, token);
+    return this.unwrapResult<T>(response);
   }
 
-  private async request<T>(method: string, endpoint: string, body?: JsonObject): Promise<T> {
+  private unwrapResult<T>(payload: T | DamlJsonApiSuccess<T>): T {
+    if (typeof payload === 'object' && payload !== null && 'result' in payload && 'status' in payload) {
+      return (payload as DamlJsonApiSuccess<T>).result;
+    }
+    return payload as T;
+  }
+
+  private async request<T>(method: string, endpoint: string, body?: JsonObject, overrideToken?: string): Promise<T> {
     if (!this.baseUrl) {
       throw new ServiceUnavailableException('DAML_JSON_API_URL is not configured.');
     }
@@ -271,8 +317,9 @@ export class DamlService {
     const url = `${this.baseUrl}/${endpoint.replace(/^\/+/, '')}`;
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
 
-    if (this.token) {
-      headers.Authorization = `Bearer ${this.token}`;
+    const authToken = overrideToken ?? this.token ?? undefined;
+    if (authToken) {
+      headers.Authorization = `Bearer ${authToken}`;
     }
 
     const response = await this.fetchWithTimeout(url, {
