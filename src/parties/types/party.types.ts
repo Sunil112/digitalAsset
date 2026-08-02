@@ -1,0 +1,13 @@
+export enum PartyType {
+    REGISTRAR = 'REGISTRAR',
+    ISSUER = 'ISSUER',
+    CUSTOMER = 'CUSTOMER',
+    COUNTERPARTY = 'COUNTERPARTY',
+}
+
+export enum PartyStatus{
+    PENDING = 'PENDING',
+    ACTIVE = 'ACTIVE',
+    SUSPENDED = 'SUSPENDED',
+    DEACTIVATED = 'DEACTIVATED',
+}
