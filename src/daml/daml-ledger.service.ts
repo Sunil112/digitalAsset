@@ -45,6 +45,7 @@ export class DamlService {
   private readonly logger = new Logger(DamlService.name);
   private readonly baseUrl = process.env.DAML_JSON_API_URL?.replace(/\/+$/, '');
   private readonly requestTimeoutMs = Number(process.env.DAML_REQUEST_TIMEOUT_MS) ?? 5000;
+  private readonly packageId = process.env.DAML_PACKAGE_ID;
   private readonly participantTemplateId = process.env.DAML_PARTICIPANT ?? 'Common.Registry.Participant';
   private readonly kycApplicationTemplateId = process.env.DAML_KYC_APPLICATION ?? 'Common.Registry.KycApplication';
   private readonly assetDirectoryTemplateId = process.env.DAML_ASSET_DIRECTORY ?? 'Common.Registry.AssetDirectory';
@@ -59,6 +60,8 @@ export class DamlService {
     'Legacy DAML JSON API endpoints ("/v1/") are deprecated and will be removed in a future release. Please update to the new endpoints ("/v2/") and ensure your Daml JSON API is version 2.0.0 or later.';
   private readonly unKnownSubmitterWarning =
     'DAML JSON API request did not specify a submitter party. Ensure that your requests include a valid submitter and that the DAML_ADMIN_PARTY environment variable is set correctly if using the default participant template.';
+  private packageIdsPromise: Promise<string[]> | null = null;
+  private readonly resolvedTemplateIdCache = new Map<string, string>();
 
   private getRequestUrls(endpoint: string): string[] {
     if (!this.baseUrl) {
@@ -271,6 +274,198 @@ export class DamlService {
     return deactivatedContract;
   }
 
+  async findAssetPermissionContract(admin: string, assetId: string): Promise<DamlCreatedContract | null> {
+    const resolvedAdmin = await this.resolvePartyIdentifier(admin);
+    const token = this.generateTokenForParties([resolvedAdmin]);
+    const results = await this.query<DamlCreatedContract>(this.assetPermissionTemplateId, {
+      admin: resolvedAdmin,
+      assetId,
+    }, token);
+
+    return results[0] ?? null;
+  }
+
+  async findAssetDirectoryContract(admin: string, assetId: string): Promise<DamlCreatedContract | null> {
+    const resolvedAdmin = await this.resolvePartyIdentifier(admin);
+    const token = this.generateTokenForParties([resolvedAdmin]);
+    const results = await this.query<DamlCreatedContract>(this.assetDirectoryTemplateId, {
+      admin: resolvedAdmin,
+      assetId,
+    }, token);
+
+    return results[0] ?? null;
+  }
+
+  async createAssetDirectory(admin: string, assetId: string): Promise<DamlCreatedContract> {
+    const resolvedAdmin = await this.resolvePartyIdentifier(admin);
+    const token = this.generateTokenForParties([resolvedAdmin]);
+    const existing = await this.findAssetDirectoryContract(resolvedAdmin, assetId);
+
+    if (existing) {
+      return existing;
+    }
+
+    const contract = await this.create<DamlCreatedContract>(this.assetDirectoryTemplateId, {
+      admin: resolvedAdmin,
+      assetId,
+      enabled: false,
+      viewers: [],
+    }, token);
+
+    this.logger.log(`Created AssetDirectory contract with ID: ${contract.contractId}`);
+    return contract;
+  }
+
+  private async findOrCreateAssetDirectory(admin: string, assetId: string): Promise<DamlCreatedContract> {
+    const existing = await this.findAssetDirectoryContract(admin, assetId);
+    if (existing) {
+      return existing;
+    }
+    return this.createAssetDirectory(admin, assetId);
+  }
+
+  async enableAsset(admin: string, assetId: string): Promise<string | Record<string, unknown>> {
+    const resolvedAdmin = await this.resolvePartyIdentifier(admin);
+    const contract = await this.findOrCreateAssetDirectory(resolvedAdmin, assetId);
+    const token = this.generateTokenForParties([resolvedAdmin]);
+
+    const updatedContractId = await this.exercise<string | Record<string, unknown>>(
+      this.assetDirectoryTemplateId,
+      contract.contractId,
+      'EnableAsset',
+      {},
+      token,
+    );
+
+    this.logger.log(`EnableAsset exercised for asset ${assetId}: ${JSON.stringify(updatedContractId)}`);
+    return updatedContractId;
+  }
+
+  async disableAsset(admin: string, assetId: string): Promise<string | Record<string, unknown>> {
+    const resolvedAdmin = await this.resolvePartyIdentifier(admin);
+    const contract = await this.findAssetDirectoryContract(resolvedAdmin, assetId);
+
+    if (!contract) {
+      throw new ServiceUnavailableException(`AssetDirectory contract for asset ${assetId} not found`);
+    }
+
+    const token = this.generateTokenForParties([resolvedAdmin]);
+
+    const updatedContractId = await this.exercise<string | Record<string, unknown>>(
+      this.assetDirectoryTemplateId,
+      contract.contractId,
+      'DisableAsset',
+      {},
+      token,
+    );
+
+    this.logger.log(`DisableAsset exercised for asset ${assetId}: ${JSON.stringify(updatedContractId)}`);
+    return updatedContractId;
+  }
+
+  async createAssetPermission(admin: string, assetId: string): Promise<DamlCreatedContract> {
+    const resolvedAdmin = await this.resolvePartyIdentifier(admin);
+    const token = this.generateTokenForParties([resolvedAdmin]);
+
+    const contract = await this.create<DamlCreatedContract>(this.assetPermissionTemplateId, {
+      admin: resolvedAdmin,
+      assetId,
+      enabled: false,
+      allowedHolders: [],
+      allowedIssuers: [],
+      viewers: [],
+    }, token);
+
+    this.logger.log(`Created AssetPermission contract with ID: ${contract.contractId}`);
+    return contract;
+  }
+
+  private async findOrCreateAssetPermission(admin: string, assetId: string): Promise<DamlCreatedContract> {
+    const existing = await this.findAssetPermissionContract(admin, assetId);
+    if (existing) {
+      return existing;
+    }
+    return this.createAssetPermission(admin, assetId);
+  }
+
+  async allowHolder(admin: string, assetId: string, holder: string): Promise<string> {
+    const resolvedAdmin = await this.resolvePartyIdentifier(admin);
+    const resolvedHolder = await this.resolvePartyIdentifier(holder);
+    const contract = await this.findOrCreateAssetPermission(resolvedAdmin, assetId);
+    const token = this.generateTokenForParties([resolvedAdmin, resolvedHolder]);
+
+    const updatedContractId = await this.exercise<string>(
+      this.assetPermissionTemplateId,
+      contract.contractId,
+      'AllowHolder',
+      { holder: resolvedHolder },
+      token,
+    );
+
+    this.logger.log(`AllowHolder exercised for ${resolvedHolder} on asset ${assetId}: ${updatedContractId}`);
+    return updatedContractId;
+  }
+
+  async blockHolder(admin: string, assetId: string, holder: string): Promise<string> {
+    const resolvedAdmin = await this.resolvePartyIdentifier(admin);
+    const resolvedHolder = await this.resolvePartyIdentifier(holder);
+    const contract = await this.findAssetPermissionContract(resolvedAdmin, assetId);
+    if (!contract) {
+      throw new ServiceUnavailableException(`AssetPermission contract for asset ${assetId} not found`);
+    }
+    const token = this.generateTokenForParties([resolvedAdmin, resolvedHolder]);
+
+    const updatedContractId = await this.exercise<string>(
+      this.assetPermissionTemplateId,
+      contract.contractId,
+      'BlockHolder',
+      { holder: resolvedHolder },
+      token,
+    );
+
+    this.logger.log(`BlockHolder exercised for ${resolvedHolder} on asset ${assetId}: ${updatedContractId}`);
+    return updatedContractId;
+  }
+
+  async allowIssuer(admin: string, assetId: string, issuer: string): Promise<string> {
+    const resolvedAdmin = await this.resolvePartyIdentifier(admin);
+    const resolvedIssuer = await this.resolvePartyIdentifier(issuer);
+    const contract = await this.findOrCreateAssetPermission(resolvedAdmin, assetId);
+    const token = this.generateTokenForParties([resolvedAdmin, resolvedIssuer]);
+
+    const updatedContractId = await this.exercise<string>(
+      this.assetPermissionTemplateId,
+      contract.contractId,
+      'AllowIssuer',
+      { issuer: resolvedIssuer },
+      token,
+    );
+
+    this.logger.log(`AllowIssuer exercised for ${resolvedIssuer} on asset ${assetId}: ${updatedContractId}`);
+    return updatedContractId;
+  }
+
+  async revokeIssuer(admin: string, assetId: string, issuer: string): Promise<string> {
+    const resolvedAdmin = await this.resolvePartyIdentifier(admin);
+    const resolvedIssuer = await this.resolvePartyIdentifier(issuer);
+    const contract = await this.findAssetPermissionContract(resolvedAdmin, assetId);
+    if (!contract) {
+      throw new ServiceUnavailableException(`AssetPermission contract for asset ${assetId} not found`);
+    }
+    const token = this.generateTokenForParties([resolvedAdmin, resolvedIssuer]);
+
+    const updatedContractId = await this.exercise<string>(
+      this.assetPermissionTemplateId,
+      contract.contractId,
+      'RevokeIssuer',
+      { issuer: resolvedIssuer },
+      token,
+    );
+
+    this.logger.log(`RevokeIssuer exercised for ${resolvedIssuer} on asset ${assetId}: ${updatedContractId}`);
+    return updatedContractId;
+  }
+
   private async get<T>(endpoint: string, token?: string): Promise<T> {
     return this.request<T>('GET', endpoint, undefined, token);
   }
@@ -280,26 +475,83 @@ export class DamlService {
   }
 
   private async create<T>(templateId: string, payload: JsonObject, token?: string): Promise<T> {
-    const response = await this.post<T | DamlJsonApiSuccess<T>>('v1/create', { templateId, payload }, token);
-    return this.unwrapResult<T>(response);
+    const candidateTemplateIds = await this.resolveTemplateCandidates(templateId);
+    let lastError: unknown;
+
+    for (const candidateTemplateId of candidateTemplateIds) {
+      try {
+        const response = await this.post<T | DamlJsonApiSuccess<T>>(
+          'v1/create',
+          { templateId: candidateTemplateId, payload },
+          token,
+        );
+        this.resolvedTemplateIdCache.set(templateId, candidateTemplateId);
+        return this.unwrapResult<T>(response);
+      } catch (error) {
+        lastError = error;
+        if (!this.isTemplateResolutionError(error)) {
+          throw error;
+        }
+      }
+    }
+
+    throw lastError;
   }
 
   private async query<T>(templateId: string, query: JsonObject, token?: string): Promise<T[]> {
-    const response = await this.post<T[] | DamlJsonApiSuccess<T[]>>('v1/query', {
-      templateIds: [templateId],
-      query,
-    }, token);
-    return this.unwrapResult<T[]>(response) ?? [];
+    const candidateTemplateIds = await this.resolveTemplateCandidates(templateId);
+    let lastError: unknown;
+
+    for (const candidateTemplateId of candidateTemplateIds) {
+      try {
+        const response = await this.post<T[] | DamlJsonApiSuccess<T[]>>(
+          'v1/query',
+          {
+            templateIds: [candidateTemplateId],
+            query,
+          },
+          token,
+        );
+        this.resolvedTemplateIdCache.set(templateId, candidateTemplateId);
+        return this.unwrapResult<T[]>(response) ?? [];
+      } catch (error) {
+        lastError = error;
+        if (!this.isTemplateResolutionError(error)) {
+          throw error;
+        }
+      }
+    }
+
+    throw lastError;
   }
 
   private async exercise<T>(templateId: string, contractId: string, choice: string, argument: JsonObject, token?: string): Promise<T> {
-    const response = await this.post<T | DamlJsonApiSuccess<T>>('v1/exercise', {
-      templateId,
-      contractId,
-      choice,
-      argument,
-    }, token);
-    return this.unwrapResult<T>(response);
+    const candidateTemplateIds = await this.resolveTemplateCandidates(templateId);
+    let lastError: unknown;
+
+    for (const candidateTemplateId of candidateTemplateIds) {
+      try {
+        const response = await this.post<T | DamlJsonApiSuccess<T>>(
+          'v1/exercise',
+          {
+            templateId: candidateTemplateId,
+            contractId,
+            choice,
+            argument,
+          },
+          token,
+        );
+        this.resolvedTemplateIdCache.set(templateId, candidateTemplateId);
+        return this.unwrapResult<T>(response);
+      } catch (error) {
+        lastError = error;
+        if (!this.isTemplateResolutionError(error)) {
+          throw error;
+        }
+      }
+    }
+
+    throw lastError;
   }
 
   private unwrapResult<T>(payload: T | DamlJsonApiSuccess<T>): T {
@@ -307,6 +559,79 @@ export class DamlService {
       return (payload as DamlJsonApiSuccess<T>).result;
     }
     return payload as T;
+  }
+
+  private async resolveTemplateCandidates(templateId: string): Promise<string[]> {
+    const cached = this.resolvedTemplateIdCache.get(templateId);
+    if (cached) {
+      return [cached];
+    }
+
+    if ((templateId.match(/:/g) ?? []).length === 2) {
+      return [templateId];
+    }
+
+    const parts = templateId.split('.').filter(Boolean);
+    if (parts.length < 2) {
+      return [templateId];
+    }
+
+    const entity = parts[parts.length - 1];
+    const moduleName = parts.slice(0, -1).join('.');
+    const packageIds = await this.getPackageIds();
+    return packageIds.map((packageId) => `${packageId}:${moduleName}:${entity}`);
+  }
+
+  private async getPackageIds(): Promise<string[]> {
+    if (!this.packageIdsPromise) {
+      this.packageIdsPromise = this.loadPackageIds();
+    }
+
+    return this.packageIdsPromise;
+  }
+
+  private async loadPackageIds(): Promise<string[]> {
+    const discoveredResponse = await this.get<string[] | DamlJsonApiSuccess<string[]>>('v1/packages');
+    const discoveredPackageIds = this.unwrapResult<string[]>(discoveredResponse) ?? [];
+
+    const candidates: string[] = [];
+    if (this.packageId) {
+      candidates.push(this.packageId);
+    }
+    candidates.push(...discoveredPackageIds);
+
+    const uniqueCandidates = Array.from(new Set(candidates.filter(Boolean)));
+
+    if (!uniqueCandidates.length) {
+      throw new ServiceUnavailableException(
+        'No DAML package IDs were returned by /v1/packages. Set DAML_PACKAGE_ID explicitly.',
+      );
+    }
+
+    if (uniqueCandidates.length > 1) {
+      this.logger.warn(
+        `Multiple DAML packages detected; attempting ${uniqueCandidates.length} package IDs for template resolution.`,
+      );
+    }
+
+    return uniqueCandidates;
+  }
+
+  private isTemplateResolutionError(error: unknown): boolean {
+    const message = this.extractErrorMessage(error).toLowerCase();
+    return message.includes('cannot resolve any template id from request');
+  }
+
+  private extractErrorMessage(error: unknown): string {
+    if (error instanceof Error) {
+      return error.message;
+    }
+
+    if (typeof error === 'string') {
+      return error;
+    }
+
+    return String(error);
   }
 
   private async request<T>(method: string, endpoint: string, body?: JsonObject, overrideToken?: string): Promise<T> {
@@ -335,7 +660,7 @@ export class DamlService {
 
     const payload = (await response.json()) as T | DamlJsonApiError;
     if (this.isDamlErrorPayload(payload)) {
-      throw new InternalServerErrorException(payload.ledgerApiError?.message ?? 'DAML request returned an error payload.');
+      throw new InternalServerErrorException(this.buildDamlErrorMessage(payload));
     }
 
     return payload as T;
@@ -343,6 +668,32 @@ export class DamlService {
 
   private isDamlErrorPayload(payload: unknown): payload is DamlJsonApiError {
     return typeof payload === 'object' && payload !== null && ('errors' in payload || 'ledgerApiError' in payload);
+  }
+
+  private buildDamlErrorMessage(payload: DamlJsonApiError): string {
+    const parts: string[] = [];
+
+    if (typeof payload.status === 'number') {
+      parts.push(`status=${payload.status}`);
+    }
+
+    if (payload.ledgerApiError?.code !== undefined) {
+      parts.push(`ledgerCode=${payload.ledgerApiError.code}`);
+    }
+
+    if (payload.ledgerApiError?.message) {
+      parts.push(`ledgerMessage=${payload.ledgerApiError.message}`);
+    }
+
+    if (Array.isArray(payload.errors) && payload.errors.length > 0) {
+      parts.push(`errors=${payload.errors.join(' | ')}`);
+    }
+
+    if (!parts.length) {
+      return 'DAML request returned an error payload.';
+    }
+
+    return `DAML request returned an error payload: ${parts.join('; ')}`;
   }
 
   private async fetchWithTimeout(url: string, options: RequestInit): Promise<Response> {
