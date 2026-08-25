@@ -27,7 +27,6 @@ interface DamlCreatedContract {
 
 interface DamlParty {
   identifier?: string;
-  identfier?: string;
   displayName?: string;
   isLocal?: boolean;
 }
@@ -38,6 +37,25 @@ export interface DamlHoldingSummary {
   owner: string;
   amount: number;
   assetAdmin: string;
+}
+
+export interface CreateSwapRequestParams {
+  swapId: string;
+  partyA: string;
+  partyB: string;
+  escrow: string;
+  pauseOwner: string;
+  expiryTime?: string;
+  legA: {
+    holdingCid: string;
+    qty: number;
+    assetAdmin: string;
+  };
+  legB: {
+    holdingCid: string;
+    qty: number;
+    assetAdmin: string;
+  };
 }
 
 @Injectable()
@@ -184,13 +202,13 @@ export class DamlService {
     const identifierHint = this.isFullPartyIdentifier(trimmedValue) ? trimmedValue.split('::')[0] : trimmedValue;
 
     const existingParty = parties.find((party) => {
-      const partyIdentifier = party.identifier ?? party.identfier ?? '';
+      const partyIdentifier = party.identifier ?? '';
       const shortIdentifier = partyIdentifier.split('::')[0];
       return partyIdentifier === trimmedValue || party.displayName === trimmedValue || shortIdentifier === identifierHint || shortIdentifier === trimmedValue;
     });
 
     if (existingParty) {
-      return existingParty.identifier ?? existingParty.identfier ?? trimmedValue;
+      return existingParty.identifier ?? trimmedValue;
     }
 
     const allocatedResponse = await this.post<DamlParty | DamlJsonApiSuccess<DamlParty>>('v1/parties/allocate', {
@@ -199,7 +217,7 @@ export class DamlService {
     });
     const allocated = this.unwrapResult<DamlParty>(allocatedResponse);
 
-    const allocatedIdentifier = allocated.identifier ?? allocated.identfier ?? identifierHint;
+    const allocatedIdentifier = allocated.identifier ?? identifierHint;
     this.logger.log(`Allocated new party: ${allocatedIdentifier}`);
     return allocatedIdentifier;
   }
@@ -464,6 +482,386 @@ export class DamlService {
 
     this.logger.log(`RevokeIssuer exercised for ${resolvedIssuer} on asset ${assetId}: ${updatedContractId}`);
     return updatedContractId;
+  }
+
+  async findAdminRoleContract(admin: string): Promise<DamlCreatedContract | null> {
+    const resolvedAdmin = await this.resolvePartyIdentifier(admin);
+    const token = this.generateTokenForParties([resolvedAdmin]);
+    const results = await this.query<DamlCreatedContract>(this.adminRoleTemplateId, { superAdmin: resolvedAdmin }, token);
+    return results[0] ?? null;
+  }
+
+  private async findOrCreateAdminRole(admin: string): Promise<DamlCreatedContract> {
+    const resolvedAdmin = await this.resolvePartyIdentifier(admin);
+    const existing = await this.findAdminRoleContract(resolvedAdmin);
+    if (existing) {
+      return existing;
+    }
+    const token = this.generateTokenForParties([resolvedAdmin]);
+    const contract = await this.create<DamlCreatedContract>(this.adminRoleTemplateId, {
+      superAdmin: resolvedAdmin,
+      admins: [],
+    }, token);
+    this.logger.log(`Created AdminRole contract with ID: ${contract.contractId}`);
+    return contract;
+  }
+
+  async findPauseSwitchContract(admin: string): Promise<DamlCreatedContract | null> {
+    const resolvedAdmin = await this.resolvePartyIdentifier(admin);
+    const token = this.generateTokenForParties([resolvedAdmin]);
+    const results = await this.query<DamlCreatedContract>(this.pauseSwitchTemplateId, { owner: resolvedAdmin }, token);
+    return results[0] ?? null;
+  }
+
+  private async findOrCreatePauseSwitch(admin: string): Promise<DamlCreatedContract> {
+    const resolvedAdmin = await this.resolvePartyIdentifier(admin);
+    const existing = await this.findPauseSwitchContract(resolvedAdmin);
+    if (existing) {
+      return existing;
+    }
+    const adminRole = await this.findOrCreateAdminRole(resolvedAdmin);
+    const token = this.generateTokenForParties([resolvedAdmin]);
+    const contract = await this.create<DamlCreatedContract>(this.pauseSwitchTemplateId, {
+      owner: resolvedAdmin,
+      viewers: [],
+      adminRoleCid: adminRole.contractId,
+      paused: false,
+    }, token);
+    this.logger.log(`Created PauseSwitch contract with ID: ${contract.contractId}`);
+    return contract;
+  }
+
+  async createMintRequest(
+    admin: string,
+    assetId: string,
+    issuer: string,
+    targetOwner: string,
+    qty: number,
+  ): Promise<{ mintContractId: string }> {
+    const resolvedAdmin = await this.resolvePartyIdentifier(admin);
+    const resolvedIssuer = await this.resolvePartyIdentifier(issuer);
+    const resolvedTargetOwner = await this.resolvePartyIdentifier(targetOwner);
+
+    const [dirContract, permContract, pauseContract] = await Promise.all([
+      this.findOrCreateAssetDirectory(resolvedAdmin, assetId),
+      this.findOrCreateAssetPermission(resolvedAdmin, assetId),
+      this.findOrCreatePauseSwitch(resolvedAdmin),
+    ]);
+
+    const token = this.generateTokenForParties([resolvedAdmin, resolvedIssuer, resolvedTargetOwner]);
+
+    const created = await this.create<DamlCreatedContract>(this.mintRequestTemplateId, {
+      assetAdmin: resolvedAdmin,
+      assetId,
+      issuer: resolvedIssuer,
+      targetOwner: resolvedTargetOwner,
+      qty: qty.toFixed(10),
+      directoryCid: dirContract.contractId,
+      permissionCid: permContract.contractId,
+      pauseCid: pauseContract.contractId,
+    }, token);
+
+    const submitted = await this.exercise<string>(
+      this.mintRequestTemplateId,
+      created.contractId,
+      'SubmitMint',
+      {},
+      token,
+    );
+
+    const mintContractId = typeof submitted === 'string' ? submitted : created.contractId;
+    this.logger.log(`MintRequest submitted, contractId: ${mintContractId}`);
+    return { mintContractId };
+  }
+
+  async approveMintRequest(admin: string, issuer: string, assetId: string, mintContractId: string): Promise<string> {
+    const resolvedAdmin = await this.resolvePartyIdentifier(admin);
+    const resolvedIssuer = await this.resolvePartyIdentifier(issuer);
+    const token = this.generateTokenForParties([resolvedAdmin, resolvedIssuer]);
+
+    const holdingContractId = await this.exercise<string>(
+      this.mintRequestTemplateId,
+      mintContractId,
+      'ApproveMint',
+      {},
+      token,
+    );
+
+    this.logger.log(`ApproveMint exercised for asset ${assetId}, holding: ${holdingContractId}`);
+    return typeof holdingContractId === 'string' ? holdingContractId : JSON.stringify(holdingContractId);
+  }
+
+  async cancelMintRequest(issuer: string, assetId: string, mintContractId: string): Promise<void> {
+    const resolvedIssuer = await this.resolvePartyIdentifier(issuer);
+    const token = this.generateTokenForParties([resolvedIssuer]);
+
+    await this.exercise<unknown>(
+      this.mintRequestTemplateId,
+      mintContractId,
+      'CancelMint',
+      {},
+      token,
+    );
+
+    this.logger.log(`CancelMint exercised for asset ${assetId}, contract: ${mintContractId}`);
+  }
+
+  async createBurnRequest(
+    admin: string,
+    assetId: string,
+    requestedBy: string,
+    holdingContractId: string,
+    qty: number,
+  ): Promise<{ burnContractId: string }> {
+    const resolvedAdmin = await this.resolvePartyIdentifier(admin);
+    const resolvedRequestedBy = await this.resolvePartyIdentifier(requestedBy);
+
+    const [dirContract, permContract, pauseContract] = await Promise.all([
+      this.findOrCreateAssetDirectory(resolvedAdmin, assetId),
+      this.findOrCreateAssetPermission(resolvedAdmin, assetId),
+      this.findOrCreatePauseSwitch(resolvedAdmin),
+    ]);
+
+    const token = this.generateTokenForParties([resolvedAdmin, resolvedRequestedBy]);
+
+    const created = await this.create<DamlCreatedContract>(this.burnRequestTemplateId, {
+      assetAdmin: resolvedAdmin,
+      requestedBy: resolvedRequestedBy,
+      holdingCid: holdingContractId,
+      qty: qty.toFixed(10),
+      directoryCid: dirContract.contractId,
+      permissionCid: permContract.contractId,
+      pauseCid: pauseContract.contractId,
+    }, token);
+
+    const submitted = await this.exercise<string>(
+      this.burnRequestTemplateId,
+      created.contractId,
+      'SubmitBurn',
+      {},
+      token,
+    );
+
+    const burnContractId = typeof submitted === 'string' ? submitted : created.contractId;
+    this.logger.log(`BurnRequest submitted for asset ${assetId}, contractId: ${burnContractId}`);
+    return { burnContractId };
+  }
+
+  async approveBurnRequest(admin: string, assetId: string, burnContractId: string): Promise<string> {
+    const resolvedAdmin = await this.resolvePartyIdentifier(admin);
+    const token = this.generateTokenForParties([resolvedAdmin]);
+
+    const holdingContractId = await this.exercise<string>(
+      this.burnRequestTemplateId,
+      burnContractId,
+      'ApproveBurn',
+      {},
+      token,
+    );
+
+    this.logger.log(`ApproveBurn exercised for asset ${assetId}, resulting holding: ${holdingContractId}`);
+    return typeof holdingContractId === 'string' ? holdingContractId : JSON.stringify(holdingContractId);
+  }
+
+  async cancelBurnRequest(requestedBy: string, assetId: string, burnContractId: string): Promise<void> {
+    const resolvedRequestedBy = await this.resolvePartyIdentifier(requestedBy);
+    const token = this.generateTokenForParties([resolvedRequestedBy]);
+
+    await this.exercise<unknown>(
+      this.burnRequestTemplateId,
+      burnContractId,
+      'CancelBurn',
+      {},
+      token,
+    );
+
+    this.logger.log(`CancelBurn exercised for asset ${assetId}, contract: ${burnContractId}`);
+  }
+
+  async queryBurnRequests(admin: string, assetId?: string): Promise<DamlCreatedContract[]> {
+    const resolvedAdmin = await this.resolvePartyIdentifier(admin);
+    const token = this.generateTokenForParties([resolvedAdmin]);
+    const query: JsonObject = { assetAdmin: resolvedAdmin };
+    if (assetId) {
+      query.assetId = assetId;
+    }
+    return this.query<DamlCreatedContract>(this.burnRequestTemplateId, query, token);
+  }
+
+  async createSwapRequest(params: CreateSwapRequestParams): Promise<{ swapRequestContractId: string }> {
+    const resolvedPartyA = await this.resolvePartyIdentifier(params.partyA);
+    const resolvedPartyB = await this.resolvePartyIdentifier(params.partyB);
+    const resolvedEscrow = await this.resolvePartyIdentifier(params.escrow);
+    const resolvedPauseOwner = await this.resolvePartyIdentifier(params.pauseOwner);
+    const resolvedLegAAdmin = await this.resolvePartyIdentifier(params.legA.assetAdmin);
+    const resolvedLegBAdmin = await this.resolvePartyIdentifier(params.legB.assetAdmin);
+
+    const pauseContract = await this.findOrCreatePauseSwitch(resolvedPauseOwner);
+
+    const token = this.generateTokenForParties([
+      resolvedPartyA,
+      resolvedPartyB,
+      resolvedEscrow,
+      resolvedPauseOwner,
+      resolvedLegAAdmin,
+      resolvedLegBAdmin,
+    ]);
+
+    const created = await this.create<DamlCreatedContract>(this.swapRequestTemplateId, {
+      partyA: resolvedPartyA,
+      partyB: resolvedPartyB,
+      escrow: resolvedEscrow,
+      swapId: params.swapId,
+      expiry: params.expiryTime ?? null,
+      legA: {
+        holdingCid: params.legA.holdingCid,
+        qty: params.legA.qty.toFixed(10),
+        assetAdmin: resolvedLegAAdmin,
+      },
+      legB: {
+        holdingCid: params.legB.holdingCid,
+        qty: params.legB.qty.toFixed(10),
+        assetAdmin: resolvedLegBAdmin,
+      },
+      pauseCid: pauseContract.contractId,
+    }, token);
+
+    await this.exercise<unknown>(
+      this.swapRequestTemplateId,
+      created.contractId,
+      'Propose',
+      {},
+      token,
+    );
+
+    this.logger.log(`SwapRequest proposed, contractId: ${created.contractId}`);
+    return { swapRequestContractId: created.contractId };
+  }
+
+  async acceptSwapRequest(partyB: string, escrow: string, swapId: string, swapRequestContractId: string): Promise<string> {
+    const resolvedPartyB = await this.resolvePartyIdentifier(partyB);
+    const resolvedEscrow = await this.resolvePartyIdentifier(escrow);
+    const token = this.generateTokenForParties([resolvedPartyB, resolvedEscrow]);
+
+    const swapEscrowContractId = await this.exercise<string>(
+      this.swapRequestTemplateId,
+      swapRequestContractId,
+      'Accept',
+      {},
+      token,
+    );
+
+    this.logger.log(`SwapRequest accepted for ${swapId}, escrow contract: ${swapEscrowContractId}`);
+    return typeof swapEscrowContractId === 'string' ? swapEscrowContractId : JSON.stringify(swapEscrowContractId);
+  }
+
+  async cancelSwapRequest(partyA: string, swapId: string, swapRequestContractId: string): Promise<void> {
+    const resolvedPartyA = await this.resolvePartyIdentifier(partyA);
+    const token = this.generateTokenForParties([resolvedPartyA]);
+
+    await this.exercise<unknown>(
+      this.swapRequestTemplateId,
+      swapRequestContractId,
+      'Cancel',
+      {},
+      token,
+    );
+
+    this.logger.log(`SwapRequest cancelled for ${swapId}, contract: ${swapRequestContractId}`);
+  }
+
+  async lockSwapLegA(
+    partyA: string,
+    escrow: string,
+    legAAdmin: string,
+    swapId: string,
+    swapEscrowContractId: string,
+  ): Promise<string> {
+    const resolvedPartyA = await this.resolvePartyIdentifier(partyA);
+    const resolvedEscrow = await this.resolvePartyIdentifier(escrow);
+    const resolvedLegAAdmin = await this.resolvePartyIdentifier(legAAdmin);
+    const token = this.generateTokenForParties([resolvedPartyA, resolvedEscrow, resolvedLegAAdmin]);
+
+    const nextEscrowId = await this.exercise<string>(
+      this.swapEscrowTemplateId,
+      swapEscrowContractId,
+      'LockLegA',
+      {},
+      token,
+    );
+
+    this.logger.log(`LockLegA exercised for swap ${swapId}, new escrow contract: ${nextEscrowId}`);
+    return typeof nextEscrowId === 'string' ? nextEscrowId : JSON.stringify(nextEscrowId);
+  }
+
+  async lockSwapLegB(
+    partyB: string,
+    escrow: string,
+    legBAdmin: string,
+    swapId: string,
+    swapEscrowContractId: string,
+  ): Promise<string> {
+    const resolvedPartyB = await this.resolvePartyIdentifier(partyB);
+    const resolvedEscrow = await this.resolvePartyIdentifier(escrow);
+    const resolvedLegBAdmin = await this.resolvePartyIdentifier(legBAdmin);
+    const token = this.generateTokenForParties([resolvedPartyB, resolvedEscrow, resolvedLegBAdmin]);
+
+    const nextEscrowId = await this.exercise<string>(
+      this.swapEscrowTemplateId,
+      swapEscrowContractId,
+      'LockLegB',
+      {},
+      token,
+    );
+
+    this.logger.log(`LockLegB exercised for swap ${swapId}, new escrow contract: ${nextEscrowId}`);
+    return typeof nextEscrowId === 'string' ? nextEscrowId : JSON.stringify(nextEscrowId);
+  }
+
+  async settleAtomicSwap(
+    escrow: string,
+    legAAdmin: string,
+    legBAdmin: string,
+    swapId: string,
+    swapEscrowContractId: string,
+  ): Promise<void> {
+    const resolvedEscrow = await this.resolvePartyIdentifier(escrow);
+    const resolvedLegAAdmin = await this.resolvePartyIdentifier(legAAdmin);
+    const resolvedLegBAdmin = await this.resolvePartyIdentifier(legBAdmin);
+    const token = this.generateTokenForParties([resolvedEscrow, resolvedLegAAdmin, resolvedLegBAdmin]);
+
+    await this.exercise<unknown>(
+      this.swapEscrowTemplateId,
+      swapEscrowContractId,
+      'SettleAtomic',
+      {},
+      token,
+    );
+
+    this.logger.log(`SettleAtomic exercised for swap ${swapId}, escrow contract: ${swapEscrowContractId}`);
+  }
+
+  async abortAtomicSwap(
+    escrow: string,
+    legAAdmin: string,
+    legBAdmin: string,
+    swapId: string,
+    swapEscrowContractId: string,
+  ): Promise<void> {
+    const resolvedEscrow = await this.resolvePartyIdentifier(escrow);
+    const resolvedLegAAdmin = await this.resolvePartyIdentifier(legAAdmin);
+    const resolvedLegBAdmin = await this.resolvePartyIdentifier(legBAdmin);
+    const token = this.generateTokenForParties([resolvedEscrow, resolvedLegAAdmin, resolvedLegBAdmin]);
+
+    await this.exercise<unknown>(
+      this.swapEscrowTemplateId,
+      swapEscrowContractId,
+      'Abort',
+      {},
+      token,
+    );
+
+    this.logger.log(`Abort exercised for swap ${swapId}, escrow contract: ${swapEscrowContractId}`);
   }
 
   private async get<T>(endpoint: string, token?: string): Promise<T> {

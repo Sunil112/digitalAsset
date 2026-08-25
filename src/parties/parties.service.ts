@@ -156,6 +156,8 @@ export class PartiesService {
       return party;
     }
 
+    let syncFailed = false;
+
     try {
       if (this.damlLedgerService.hasParticipantSyncConfig()) {
         const contractId = await this.damlLedgerService.activateParticipant(party.partyId);
@@ -170,12 +172,19 @@ export class PartiesService {
       };
     } catch (error) {
       this.logger.warn(`DAML activation failed for ${party.partyId}: ${String(error)}`);
-      party.status = PartyStatus.ACTIVE;
-      party.active = true;
+      // Sync failed: keep the party in its previous status instead of advancing it.
       party.metadata = {
         ...(party.metadata ?? {}),
-        damlSyncStatus: 'LOCAL_ONLY',
+        damlSyncStatus: 'SYNC_FAILED',
+        damlSyncError: error instanceof Error ? error.message : String(error),
       };
+      syncFailed = true;
+    }
+
+    if (syncFailed) {
+      this.parties.set(party.id, party);
+      await this.saveDataToDisk();
+      return party;
     }
 
     this.parties.set(party.id, party);
@@ -195,6 +204,8 @@ export class PartiesService {
       return party;
     }
 
+    let syncFailed = false;
+
     try {
       if (this.damlLedgerService.hasParticipantSyncConfig()) {
         const contractId = await this.damlLedgerService.deactivateParticipant(party.partyId);
@@ -209,12 +220,19 @@ export class PartiesService {
       };
     } catch (error) {
       this.logger.warn(`DAML deactivation failed for ${party.partyId}: ${String(error)}`);
-      party.status = PartyStatus.DEACTIVATED;
-      party.active = false;
+      // Sync failed: keep the party in its previous status instead of advancing it.
       party.metadata = {
         ...(party.metadata ?? {}),
-        damlSyncStatus: 'LOCAL_ONLY',
+        damlSyncStatus: 'SYNC_FAILED',
+        damlSyncError: error instanceof Error ? error.message : String(error),
       };
+      syncFailed = true;
+    }
+
+    if (syncFailed) {
+      this.parties.set(party.id, party);
+      await this.saveDataToDisk();
+      return party;
     }
 
     this.parties.set(party.id, party);
