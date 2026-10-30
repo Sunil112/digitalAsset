@@ -23,6 +23,29 @@ export class SwapService {
 
   constructor(private readonly damlService: DamlService) {}
 
+async createSwapRequest(dto: CreateSwapRequestDto): Promise<SwapRequestRecord> {
+    await this.ensureInitialized();
+
+    const now = new Date().toISOString();
+    const request: SwapRequestRecord = {
+      id: randomUUID(),
+      swapId: dto.swapId.trim(),
+      partyAId: dto.partyAId.trim(),
+      partyBId: dto.partyBId.trim(),
+      escrowPartyId: dto.escrowPartyId.trim(),
+      pauseOwnerPartyId: dto.pauseOwnerPartyId.trim(),
+      legAHoldingContractId: dto.legAHoldingContractId.trim(),
+      legAQty: dto.legAQty,
+      legAAdminPartyId: dto.legAAdminPartyId.trim(),
+      legBHoldingContractId: dto.legBHoldingContractId.trim(),
+      legBQty: dto.legBQty,
+      legBAdminPartyId: dto.legBAdminPartyId.trim(),
+      expiryTime: dto.expiryTime,
+      status: SwapStatus.PROPOSED,
+      createdAt: now,
+      updatedAt: now,
+    };
+  }
 
   private async saveToDisk(): Promise<void> {
     const data = JSON.stringify(Array.from(this.requests.values()), null, 2);
