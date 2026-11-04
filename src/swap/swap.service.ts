@@ -23,7 +23,7 @@ export class SwapService {
 
   constructor(private readonly damlService: DamlService) {}
 
-async createSwapRequest(dto: CreateSwapRequestDto): Promise<SwapRequestRecord> {
+  async createSwapRequest(dto: CreateSwapRequestDto): Promise<SwapRequestRecord> {
     await this.ensureInitialized();
 
     const now = new Date().toISOString();
@@ -45,8 +45,44 @@ async createSwapRequest(dto: CreateSwapRequestDto): Promise<SwapRequestRecord> {
       createdAt: now,
       updatedAt: now,
     };
-  }
 
+    if (this.damlService.isEnabled()) {
+      try {
+        const { swapRequestContractId } = await this.damlService.createSwapRequest({
+          swapId: request.swapId,
+          partyA: request.partyAId,
+          partyB: request.partyBId,
+          escrow: request.escrowPartyId,
+          pauseOwner: request.pauseOwnerPartyId,
+          expiryTime: request.expiryTime,
+          legA: {
+            holdingCid: request.legAHoldingContractId,
+            qty: request.legAQty,
+            assetAdmin: request.legAAdminPartyId,
+          },
+          legB: {
+            holdingCid: request.legBHoldingContractId,
+            qty: request.legBQty,
+            assetAdmin: request.legBAdminPartyId,
+          },
+        });
+        request.damlSwapRequestContractId = swapRequestContractId;
+        request.metadata = { damlSyncStatus: 'SYNCED' };
+      } catch (error) {
+        this.logger.warn(`DAML swap request creation failed: ${String(error)}`);
+        request.metadata = {
+          damlSyncStatus: 'LOCAL_ONLY',
+          damlSyncError: error instanceof Error ? error.message : String(error),
+        };
+      }
+    } else {
+      request.metadata = { damlSyncStatus: 'SKIPPED' };
+    }
+
+    this.requests.set(request.id, request);
+    await this.saveToDisk();
+    return request;
+  }
   private async saveToDisk(): Promise<void> {
     const data = JSON.stringify(Array.from(this.requests.values()), null, 2);
     await fs.mkdir(join(process.cwd(), 'data'), { recursive: true });
