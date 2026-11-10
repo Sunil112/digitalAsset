@@ -139,6 +139,60 @@ export class SwapService {
     await this.saveToDisk();
     return request;
   }
+
+    async cancelSwapRequest(dto: CancelSwapDto): Promise<SwapRequestRecord> {
+    await this.ensureInitialized();
+
+    const request = this.requests.get(dto.swapRequestId);
+    if (!request) {
+      throw new NotFoundException(`SwapRequest ${dto.swapRequestId} not found`);
+    }
+
+    if (request.status !== SwapStatus.PROPOSED) {
+      throw new BadRequestException(`SwapRequest ${dto.swapRequestId} is not in PROPOSED state`);
+    }
+
+    let syncFailed = false;
+
+    if (this.damlService.isEnabled()) {
+      try {
+        const contractId = request.damlSwapRequestContractId;
+        if (!contractId) {
+          throw new Error('No DAML swap request contract ID associated with this swap request');
+        }
+
+        await this.damlService.cancelSwapRequest(
+          dto.partyAId.trim(),
+          request.swapId,
+          contractId,
+        );
+
+        request.metadata = { ...(request.metadata ?? {}), damlSyncStatus: 'SYNCED' };
+      } catch (error) {
+        this.logger.warn(`DAML Cancel swap failed: ${String(error)}`);
+        request.metadata = {
+          ...(request.metadata ?? {}),
+          damlSyncStatus: 'SYNC_FAILED',
+          damlSyncError: error instanceof Error ? error.message : String(error),
+        };
+        syncFailed = true;
+      }
+    }
+
+    // Sync failed: keep the request PROPOSED instead of advancing it to CANCELLED.
+    if (syncFailed) {
+      this.requests.set(request.id, request);
+      await this.saveToDisk();
+      return request;
+    }
+
+    request.status = SwapStatus.CANCELLED;
+    request.updatedAt = new Date().toISOString();
+
+    this.requests.set(request.id, request);
+    await this.saveToDisk();
+    return request;
+  }
   private async saveToDisk(): Promise<void> {
     const data = JSON.stringify(Array.from(this.requests.values()), null, 2);
     await fs.mkdir(join(process.cwd(), 'data'), { recursive: true });
