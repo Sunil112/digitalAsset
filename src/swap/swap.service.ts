@@ -193,6 +193,53 @@ export class SwapService {
     await this.saveToDisk();
     return request;
   }
+
+   async lockLegA(dto: LockLegADto): Promise<SwapRequestRecord> {
+    await this.ensureInitialized();
+
+    const request = this.getRequestOrThrow(dto.swapRequestId);
+    this.assertCanLock(request);
+
+    let syncFailed = false;
+
+    if (this.damlService.isEnabled()) {
+      try {
+        const swapEscrowContractId = this.getEscrowContractOrThrow(request);
+        const nextEscrowId = await this.damlService.lockSwapLegA(
+          dto.partyAId.trim(),
+          dto.escrowPartyId.trim(),
+          dto.legAAdminPartyId.trim(),
+          request.swapId,
+          swapEscrowContractId,
+        );
+        request.damlSwapEscrowContractId = nextEscrowId;
+        request.metadata = { ...(request.metadata ?? {}), damlSyncStatus: 'SYNCED' };
+      } catch (error) {
+        this.logger.warn(`DAML LockLegA failed: ${String(error)}`);
+        request.metadata = {
+          ...(request.metadata ?? {}),
+          damlSyncStatus: 'SYNC_FAILED',
+          damlSyncError: error instanceof Error ? error.message : String(error),
+        };
+        syncFailed = true;
+      }
+    }
+
+    // Sync failed: keep the request in its previous status instead of advancing it.
+    if (syncFailed) {
+      this.requests.set(request.id, request);
+      await this.saveToDisk();
+      return request;
+    }
+
+    request.status = request.status === SwapStatus.LEG_B_LOCKED ? SwapStatus.READY_TO_SETTLE : SwapStatus.LEG_A_LOCKED;
+    request.updatedAt = new Date().toISOString();
+
+    this.requests.set(request.id, request);
+    await this.saveToDisk();
+    return request;
+  }
+
   private async saveToDisk(): Promise<void> {
     const data = JSON.stringify(Array.from(this.requests.values()), null, 2);
     await fs.mkdir(join(process.cwd(), 'data'), { recursive: true });
