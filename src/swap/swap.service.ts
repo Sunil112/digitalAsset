@@ -285,6 +285,41 @@ export class SwapService {
     return request;
   }
 
+  async settleAtomicSwap(dto: SettleSwapDto): Promise<SwapRequestRecord> {
+    await this.ensureInitialized();
+
+    const request = this.getRequestOrThrow(dto.swapRequestId);
+    if (request.status !== SwapStatus.READY_TO_SETTLE) {
+      throw new BadRequestException(`SwapRequest ${dto.swapRequestId} is not in READY_TO_SETTLE state`);
+    }
+
+    let syncFailed = false;
+
+    if (this.damlService.isEnabled()) {
+      try {
+        const swapEscrowContractId = this.getEscrowContractOrThrow(request);
+        await this.damlService.settleAtomicSwap(
+          dto.escrowPartyId.trim(),
+          dto.legAAdminPartyId.trim(),
+          dto.legBAdminPartyId.trim(),
+          request.swapId,
+          swapEscrowContractId,
+        );
+        request.metadata = { ...(request.metadata ?? {}), damlSyncStatus: 'SYNCED' };
+      } catch (error) {
+        this.logger.warn(`DAML SettleAtomic failed: ${String(error)}`);
+       
+      }
+    }
+
+
+    request.status = SwapStatus.SETTLED;
+    request.updatedAt = new Date().toISOString();
+
+    this.requests.set(request.id, request);
+    await this.saveToDisk();
+    return request;
+  }
 
   private async saveToDisk(): Promise<void> {
     const data = JSON.stringify(Array.from(this.requests.values()), null, 2);
