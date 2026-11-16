@@ -308,10 +308,21 @@ export class SwapService {
         request.metadata = { ...(request.metadata ?? {}), damlSyncStatus: 'SYNCED' };
       } catch (error) {
         this.logger.warn(`DAML SettleAtomic failed: ${String(error)}`);
-       
+        request.metadata = {
+          ...(request.metadata ?? {}),
+          damlSyncStatus: 'SYNC_FAILED',
+          damlSyncError: error instanceof Error ? error.message : String(error),
+        };
+        syncFailed = true;
       }
     }
 
+    // Sync failed: keep the request READY_TO_SETTLE instead of advancing it to SETTLED.
+    if (syncFailed) {
+      this.requests.set(request.id, request);
+      await this.saveToDisk();
+      return request;
+    }
 
     request.status = SwapStatus.SETTLED;
     request.updatedAt = new Date().toISOString();
