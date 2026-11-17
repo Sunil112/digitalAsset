@@ -332,6 +332,37 @@ export class SwapService {
     return request;
   }
 
+  
+  async abortAtomicSwap(dto: AbortSwapDto): Promise<SwapRequestRecord> {
+    await this.ensureInitialized();
+
+    const request = this.getRequestOrThrow(dto.swapRequestId);
+    const allowed = [
+      SwapStatus.ACCEPTED,
+      SwapStatus.LEG_A_LOCKED,
+      SwapStatus.LEG_B_LOCKED,
+      SwapStatus.READY_TO_SETTLE,
+    ];
+
+    if (!allowed.includes(request.status)) {
+      throw new BadRequestException(`SwapRequest ${dto.swapRequestId} cannot be aborted from ${request.status}`);
+    }
+
+    let syncFailed = false;
+
+   
+    }
+
+  
+
+    request.status = SwapStatus.ABORTED;
+    request.updatedAt = new Date().toISOString();
+
+    this.requests.set(request.id, request);
+    await this.saveToDisk();
+    return request;
+  }
+
   private async saveToDisk(): Promise<void> {
     const data = JSON.stringify(Array.from(this.requests.values()), null, 2);
     await fs.mkdir(join(process.cwd(), 'data'), { recursive: true });
