@@ -332,8 +332,7 @@ export class SwapService {
     return request;
   }
 
-  
-  async abortAtomicSwap(dto: AbortSwapDto): Promise<SwapRequestRecord> {
+   async abortAtomicSwap(dto: AbortSwapDto): Promise<SwapRequestRecord> {
     await this.ensureInitialized();
 
     const request = this.getRequestOrThrow(dto.swapRequestId);
@@ -350,10 +349,34 @@ export class SwapService {
 
     let syncFailed = false;
 
-   
+    if (this.damlService.isEnabled()) {
+      try {
+        const swapEscrowContractId = this.getEscrowContractOrThrow(request);
+        await this.damlService.abortAtomicSwap(
+          dto.escrowPartyId.trim(),
+          dto.legAAdminPartyId.trim(),
+          dto.legBAdminPartyId.trim(),
+          request.swapId,
+          swapEscrowContractId,
+        );
+        request.metadata = { ...(request.metadata ?? {}), damlSyncStatus: 'SYNCED' };
+      } catch (error) {
+        this.logger.warn(`DAML Abort swap failed: ${String(error)}`);
+        request.metadata = {
+          ...(request.metadata ?? {}),
+          damlSyncStatus: 'SYNC_FAILED',
+          damlSyncError: error instanceof Error ? error.message : String(error),
+        };
+        syncFailed = true;
+      }
     }
 
-  
+    // Sync failed: keep the request in its previous status instead of advancing it to ABORTED.
+    if (syncFailed) {
+      this.requests.set(request.id, request);
+      await this.saveToDisk();
+      return request;
+    }
 
     request.status = SwapStatus.ABORTED;
     request.updatedAt = new Date().toISOString();
@@ -362,6 +385,7 @@ export class SwapService {
     await this.saveToDisk();
     return request;
   }
+
 
   private async saveToDisk(): Promise<void> {
     const data = JSON.stringify(Array.from(this.requests.values()), null, 2);
