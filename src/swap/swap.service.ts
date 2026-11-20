@@ -386,6 +386,23 @@ export class SwapService {
     return request;
   }
 
+    private getRequestOrThrow(requestId: string): SwapRequestRecord {
+    const request = this.requests.get(requestId);
+    if (!request) {
+      throw new NotFoundException(`SwapRequest ${requestId} not found`);
+    }
+
+    return request;
+  }
+
+  private getEscrowContractOrThrow(request: SwapRequestRecord): string {
+    if (!request.damlSwapEscrowContractId) {
+      throw new BadRequestException(`SwapRequest ${request.id} has no DAML swap escrow contract ID`);
+    }
+
+    return request.damlSwapEscrowContractId;
+  }
+
 
   private async saveToDisk(): Promise<void> {
     const data = JSON.stringify(Array.from(this.requests.values()), null, 2);
