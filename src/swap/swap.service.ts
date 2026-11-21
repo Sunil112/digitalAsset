@@ -402,7 +402,27 @@ export class SwapService {
 
     return request.damlSwapEscrowContractId;
   }
+  private async ensureInitialized(): Promise<void> {
+    if (!this.initPromise) {
+      this.initPromise = this.loadFromDisk();
+    }
+    return this.initPromise;
+  }
 
+  
+  private async loadFromDisk(): Promise<void> {
+    try {
+      const raw = await fs.readFile(this.dataFilePath, 'utf-8');
+      const parsed = JSON.parse(raw) as SwapRequestRecord[];
+      for (const req of parsed) {
+        this.requests.set(req.id, req);
+      }
+    } catch (error: any) {
+      if (error?.code !== 'ENOENT') {
+        this.logger.warn(`Failed to load swap requests from disk: ${String(error)}`);
+      }
+    }
+  }
 
   private async saveToDisk(): Promise<void> {
     const data = JSON.stringify(Array.from(this.requests.values()), null, 2);
