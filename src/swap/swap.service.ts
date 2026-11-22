@@ -84,7 +84,12 @@ export class SwapService {
     return request;
   }
 
-    async acceptSwapRequest(dto: AcceptSwapDto): Promise<SwapRequestRecord> {
+  async getAllSwapRequests(): Promise<SwapRequestRecord[]> {
+    await this.ensureInitialized();
+    return Array.from(this.requests.values());
+  }
+
+  async acceptSwapRequest(dto: AcceptSwapDto): Promise<SwapRequestRecord> {
     await this.ensureInitialized();
 
     const request = this.requests.get(dto.swapRequestId);
@@ -140,7 +145,7 @@ export class SwapService {
     return request;
   }
 
-    async cancelSwapRequest(dto: CancelSwapDto): Promise<SwapRequestRecord> {
+  async cancelSwapRequest(dto: CancelSwapDto): Promise<SwapRequestRecord> {
     await this.ensureInitialized();
 
     const request = this.requests.get(dto.swapRequestId);
@@ -194,7 +199,7 @@ export class SwapService {
     return request;
   }
 
-   async lockLegA(dto: LockLegADto): Promise<SwapRequestRecord> {
+  async lockLegA(dto: LockLegADto): Promise<SwapRequestRecord> {
     await this.ensureInitialized();
 
     const request = this.getRequestOrThrow(dto.swapRequestId);
@@ -239,6 +244,7 @@ export class SwapService {
     await this.saveToDisk();
     return request;
   }
+
   async lockLegB(dto: LockLegBDto): Promise<SwapRequestRecord> {
     await this.ensureInitialized();
 
@@ -332,7 +338,7 @@ export class SwapService {
     return request;
   }
 
-   async abortAtomicSwap(dto: AbortSwapDto): Promise<SwapRequestRecord> {
+  async abortAtomicSwap(dto: AbortSwapDto): Promise<SwapRequestRecord> {
     await this.ensureInitialized();
 
     const request = this.getRequestOrThrow(dto.swapRequestId);
@@ -386,7 +392,7 @@ export class SwapService {
     return request;
   }
 
-    private getRequestOrThrow(requestId: string): SwapRequestRecord {
+  private getRequestOrThrow(requestId: string): SwapRequestRecord {
     const request = this.requests.get(requestId);
     if (!request) {
       throw new NotFoundException(`SwapRequest ${requestId} not found`);
@@ -402,6 +408,14 @@ export class SwapService {
 
     return request.damlSwapEscrowContractId;
   }
+
+  private assertCanLock(request: SwapRequestRecord): void {
+    const allowed = [SwapStatus.ACCEPTED, SwapStatus.LEG_A_LOCKED, SwapStatus.LEG_B_LOCKED];
+    if (!allowed.includes;(request.status)) {
+      throw new BadRequestException(`SwapRequest ${request.id} cannot lock from ${request.status}`);
+    }
+  }
+
   private async ensureInitialized(): Promise<void> {
     if (!this.initPromise) {
       this.initPromise = this.loadFromDisk();
@@ -409,7 +423,6 @@ export class SwapService {
     return this.initPromise;
   }
 
-  
   private async loadFromDisk(): Promise<void> {
     try {
       const raw = await fs.readFile(this.dataFilePath, 'utf-8');
