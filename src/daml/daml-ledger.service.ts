@@ -62,7 +62,7 @@ export interface CreateSwapRequestParams {
 export class DamlService {
   private readonly logger = new Logger(DamlService.name);
   private readonly baseUrl = process.env.DAML_JSON_API_URL?.replace(/\/+$/, '');
-  private readonly requestTimeoutMs = Number(process.env.DAML_REQUEST_TIMEOUT_MS) ?? 5000;
+  private readonly requestTimeoutMs = Number(process.env.DAML_REQUEST_TIMEOUT_MS) || 5000;
   private readonly packageId = process.env.DAML_PACKAGE_ID;
   private readonly participantTemplateId = process.env.DAML_PARTICIPANT ?? 'Common.Registry.Participant';
   private readonly kycApplicationTemplateId = process.env.DAML_KYC_APPLICATION ?? 'Common.Registry.KycApplication';
